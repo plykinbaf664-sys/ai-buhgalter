@@ -22,5 +22,7 @@ def _reject_constant(value):
 
 
 def validate_json(model: type[Model], data: str | bytes | bytearray) -> Model:
-    return model.model_validate(json.loads(data, object_pairs_hook=_unique_object,
-                                          parse_constant=_reject_constant))
+    json.loads(data, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
+    # Strict JSON validation permits JSON-native representations of dates, Decimal
+    # and tuples while still rejecting coerced integers/booleans and extra fields.
+    return model.model_validate_json(data)

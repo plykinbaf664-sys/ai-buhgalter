@@ -116,3 +116,37 @@ def test_real_write_requires_explicit_flag():
         assert error.value.stage == "write_disabled"
         assert backend.writes == 0
     asyncio.run(scenario())
+
+
+def test_native_adapter_pdf_is_passed_through_without_mock_renderer(monkeypatch):
+    from app.domain import PdfDocument
+    native = PdfDocument(content=b"%PDF-1.7\nnative-test-document\n%%EOF")
+    class NativeTestAdapter(FakeOneC):
+        is_fake = False
+
+        async def get_pdf(self, invoice):
+            assert invoice.posted
+            return native
+
+    def forbidden(*args):
+        raise AssertionError("Native adapter must not use mock PDF")
+    monkeypatch.setattr("app.fake_onec.render_mock_pdf", forbidden)
+    async def scenario():
+        backend = NativeTestAdapter()
+        service = InvoiceService(backend, allow_real_writes=True)
+        prepared = await service.prepare(parse_command("Создай счёт для ООО Ромашка за сентябрь 2026"), "native", 123)
+        result = await service.execute(prepared, "native", 123)
+        assert result.pdf == native and len(backend.documents) == 1
+    asyncio.run(scenario())
+
+
+def test_pdf_request_rejects_forged_document_metadata():
+    async def scenario():
+        backend = FakeOneC()
+        service = InvoiceService(backend)
+        prepared = await service.prepare(parse_command("Создай счёт для ООО Ромашка за сентябрь 2026"), "pdf", 123)
+        result = await service.execute(prepared, "pdf", 123)
+        for changed in ({"revision": "forged"}, {"client_id": "other"}, {"preview_digest": "0" * 64}):
+            with pytest.raises(ValueError):
+                await backend.get_pdf(Invoice.model_validate({**result.invoice.model_dump(), **changed}))
+    asyncio.run(scenario())

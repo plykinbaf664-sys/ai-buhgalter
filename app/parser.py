@@ -22,6 +22,10 @@ def parse_command(text: str) -> InvoiceCommand:
     match = PATTERN.fullmatch(" ".join(text.strip().split()))
     if not match:
         raise UserProblem(HELP)
+    # A legacy name must not swallow additional invoice parameters. Such input
+    # belongs to the structured language interpreter, not this compatibility grammar.
+    if re.search(r"\b(?:за|на|с|со|без|как|количество)\b", match["client"], re.I):
+        raise UserProblem(HELP)
     return InvoiceCommand(
         client=match["client"], year=int(match["year"]),
         month=MONTHS.index(match["month"].lower()) + 1,

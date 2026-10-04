@@ -1,10 +1,11 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from app.domain import (BillingBasis, Invoice, InvoiceCommand, InvoiceResult, OneC,
+from app.domain import (BillingBasis, Invoice, InvoiceCommand, InvoiceConflict, InvoiceResult, OneC,
                         OperationState, PdfDocument, PreparedInvoice, ResolvedClient,
-                        ResolvedInvoiceCommand, StaleBasis, StrictModel, UserProblem,
+                        ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection,
+                        ServiceProblem, StaleBasis, StrictModel, UserProblem,
                         WorkflowFailure, WritesDisabled)
 
 logger = logging.getLogger("invoices")
@@ -43,14 +44,63 @@ class InvoiceService:
         if getattr(self.onec, "is_fake", False) is not True and not self.allow_real_writes:
             raise WritesDisabled()
 
-    async def prepare(self, command: InvoiceCommand, request_id: str, user_id: int) -> PreparedInvoice:
+    async def prepare(self, command: InvoiceCommand, request_id: str, user_id: int, *,
+                      existing: PreparedInvoice | None = None,
+                      old_command: InvoiceCommand | None = None) -> PreparedInvoice:
         try:
             command = InvoiceCommand.model_validate(command)
-            client = ResolvedClient.model_validate(await asyncio.wait_for(
-                self.onec.resolve_client(command.client), self.timeout))
-            resolved = ResolvedInvoiceCommand(client_id=client.client_id, year=command.year, month=command.month)
+            client = (ResolvedClient(client_id=existing.request.client_id, display_name=existing.display_name)
+                      if existing is not None and old_command is not None and command.client == old_command.client
+                      else ResolvedClient.model_validate(await asyncio.wait_for(
+                          self.onec.resolve_client(command.client), self.timeout)))
+            selections = []
+            for number, selected in enumerate(command.services, 1):
+                cached = None
+                if existing is not None and old_command is not None and client.client_id == existing.request.client_id:
+                    for old, resolved_old in zip(old_command.services, existing.request.services):
+                        if old.query == selected.query:
+                            cached = resolved_old.service_id
+                            break
+                try:
+                    service_id = cached or ResolvedService.model_validate(await asyncio.wait_for(
+                        self.onec.resolve_service(client.client_id, selected.query), self.timeout)).service_id
+                except UserProblem as exc:
+                    raise ServiceProblem(str(exc), number) from None
+                selections.append(ResolvedServiceSelection(service_id=service_id, quantity=selected.quantity))
+            period = command.period
+            resolved = ResolvedInvoiceCommand(
+                client_id=client.client_id, year=period.year if period else None, month=period.month if period else None,
+                invoice_date=command.invoice_date or date.today(), service_period=period,
+                services=tuple(selections), tax=command.tax, previous=command.previous,
+                legacy_period=command.legacy_period or (command.invoice_date is None and command.year is not None),
+            )
             basis = BillingBasis.model_validate(await asyncio.wait_for(
                 self.onec.resolve_basis(resolved), self.timeout))
+            if basis.preview is None:
+                raise ValueError("Provider did not return a preview")
+            if period is not None and basis.preview.service_period != period:
+                raise ValueError("Provider changed requested service period")
+            if selections and [(s.service_id, s.quantity) for s in selections] != [
+                    (line.service_id, s.quantity) for s, line in zip(selections, basis.preview.lines)]:
+                raise ValueError("Provider changed selected services")
+            if selections and len(selections) != len(basis.preview.lines):
+                raise ValueError("Provider changed line count")
+            for selected, line in zip(selections, basis.preview.lines):
+                if selected.quantity is not None and selected.quantity != line.quantity:
+                    raise ValueError("Provider changed requested quantity")
+            for line in basis.preview.lines:
+                if command.tax.mode == "with_tax" and line.tax.rate == 0:
+                    raise ValueError("Provider ignored requested tax treatment")
+                if command.tax.mode == "without_tax" and line.tax.rate != 0:
+                    raise ValueError("Provider ignored requested tax treatment")
+            supplied_period = basis.preview.service_period
+            resolved = ResolvedInvoiceCommand(**{**resolved.model_dump(),
+                "service_period": supplied_period,
+                "year": supplied_period.year if supplied_period else None,
+                "month": supplied_period.month if supplied_period else None,
+                "services": tuple(
+                ResolvedServiceSelection(service_id=line.service_id, quantity=line.quantity)
+                for line in basis.preview.lines)})
             prepared = PreparedInvoice(request=resolved, basis=basis, display_name=client.display_name)
             event(request_id=request_id, user_id=user_id, stage="resolve", status="success",
                   operation_id=prepared.operation_id)
@@ -61,11 +111,40 @@ class InvoiceService:
             event(request_id=request_id, user_id=user_id, stage="resolve", status="error", error=type(exc).__name__)
             raise WorkflowFailure("resolve", None) from None
 
+    async def refresh(self, prepared: PreparedInvoice, request_id: str, user_id: int) -> PreparedInvoice:
+        """Before confirming, refresh read-only. Existing/uncertain writes remain frozen."""
+        prepared = PreparedInvoice.model_validate(prepared)
+        stage, known_state = "reconcile", "unknown"
+        try:
+            state = await self._read_state(prepared)
+            known_state = state.status
+            if state.status == "unknown":
+                raise WorkflowFailure("reconcile", None, prepared.operation_id)
+            if state.status != "not_started":
+                return prepared
+            stage = "refresh"
+            basis = BillingBasis.model_validate(await asyncio.wait_for(
+                self.onec.resolve_basis(prepared.request), self.timeout))
+            refreshed = PreparedInvoice(request=prepared.request, basis=basis, display_name=prepared.display_name)
+            if refreshed.basis.key != prepared.basis.key:
+                raise ValueError("Provider changed billing identity during refresh")
+            return refreshed
+        except InvoiceConflict:
+            raise UserProblem("На это основание уже создан счёт с другими данными. Изменять его автоматически нельзя. Обратитесь к оператору.") from None
+        except (UserProblem, WorkflowFailure):
+            raise
+        except Exception as exc:
+            event(request_id=request_id, user_id=user_id, stage="refresh", status="error", error=type(exc).__name__)
+            raise WorkflowFailure("resolve" if stage == "refresh" else "reconcile", None,
+                                  prepared.operation_id, known_state) from None
+
     @staticmethod
     def _check_invoice(invoice: Invoice, prepared: PreparedInvoice) -> Invoice:
         invoice = Invoice.model_validate(invoice)
         if invoice.client_id != prepared.request.client_id or invoice.basis_key != prepared.basis.key:
             raise ValueError("Document does not belong to resolved operation")
+        if invoice.preview_digest != prepared.preview.digest:
+            raise InvoiceConflict()
         return invoice
 
     async def _read_state(self, prepared: PreparedInvoice) -> OperationState:

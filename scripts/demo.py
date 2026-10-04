@@ -58,7 +58,7 @@ def main():
             evidence.callback_acks += 1
             return httpx.Response(200, json=CallbackAnswerResponse(ok=True, result=True).model_dump())
         elif request.url.path.endswith("sendDocument"):
-            assert b"%PDF-" in request.content and b"MOCK ONLY" in request.content
+            assert b"%PDF-" in request.content and b"test-invoice.pdf" in request.content
             evidence.pdf_deliveries += 1
         else:
             raise AssertionError("Unexpected Telegram method")
@@ -128,10 +128,11 @@ def main():
                 press(2, evidence.confirmation_data)
                 press(2, evidence.confirmation_data)
                 send(3, text="Сформируй счёт для ООО Ромашка за сентябрь 2026")
+                press(4, evidence.confirmation_data)
                 assert len(backend.documents) == 1
                 assert evidence.stt_calls == evidence.llm_calls == 1
                 assert evidence.pdf_deliveries == 1
-                assert evidence.callback_acks == 1
+                assert evidence.callback_acks == 2
                 assert next(iter(backend.documents.values())).posted
             print("OFFLINE E2E OK: voice -> STT -> LLM -> confirmation button -> fake 1C -> PDF")
             print("Repeated update: no new AI call or delivery. Repeated command: no second PDF.")

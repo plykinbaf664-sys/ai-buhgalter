@@ -30,6 +30,8 @@ def harness():
     failures = []
 
     def respond(request):
+        if request.url.path.endswith("answerCallbackQuery"):
+            return httpx.Response(200, json={"ok": True, "result": True})
         calls.append(request)
         if failures:
             failure = failures.pop(0)
@@ -47,31 +49,49 @@ def harness():
         yield client, backend, calls, failures, settings
 
 
+def confirm_latest(client, calls, update_id=100001):
+    prompt = next(json.loads(call.content) for call in reversed(calls)
+                  if call.url.path.endswith("sendMessage") and "reply_markup" in json.loads(call.content))
+    data = prompt["reply_markup"]["inline_keyboard"][0][0]["callback_data"]
+    return client.post("/telegram/webhook", json={"update_id": update_id, "callback_query": {
+        "id": str(update_id), "from": {"id": 123, "is_bot": False},
+        "message": {"message_id": 1, "chat": {"id": 123, "type": "private"}}, "data": data,
+    }})
+
+
 def test_full_text_pipeline(harness):
     client, backend, calls, _, _ = harness
     assert client.get("/healthz").json() == {"status": "ok", "mode": "mock"}
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
+    assert not backend.documents
+    assert "Итого:" in json.loads(calls[0].content)["text"]
+    assert confirm_latest(client, calls).status_code == 200
     assert len(backend.documents) == 1
     assert next(iter(backend.documents.values())).posted
-    assert len(calls) == 1 and calls[0].url.path.endswith("/sendDocument")
-    assert b"application/pdf" in calls[0].content
-    assert b"%PDF-" in calls[0].content and b"MOCK ONLY" in calls[0].content
+    assert len(calls) == 2 and calls[-1].url.path.endswith("/sendDocument")
+    assert b"application/pdf" in calls[-1].content
+    assert b"%PDF-" in calls[-1].content
 
 
 def test_duplicate_update_and_new_message(harness):
     client, backend, calls, _, _ = harness
-    for update_id in (1, 1, 2):
+    for update_id in (1, 1):
         assert client.post("/telegram/webhook", json=make_update(update_id)).status_code == 200
+    assert confirm_latest(client, calls).status_code == 200
+    assert client.post("/telegram/webhook", json=make_update(2)).status_code == 200
+    assert confirm_latest(client, calls, 100002).status_code == 200
     assert len(backend.documents) == 1
-    assert [call.url.path.rsplit("/", 1)[-1] for call in calls] == ["sendDocument", "sendMessage"]
+    assert [call.url.path.rsplit("/", 1)[-1] for call in calls] == ["sendMessage", "sendDocument", "sendMessage", "sendMessage"]
     assert "уже отправлен" in json.loads(calls[-1].content)["text"]
 
 
 def test_different_periods_still_send_separate_pdfs(harness):
     client, backend, calls, _, _ = harness
     assert client.post("/telegram/webhook", json=make_update(1)).status_code == 200
+    assert confirm_latest(client, calls).status_code == 200
     october = TEXT.replace("сентябрь", "октябрь")
     assert client.post("/telegram/webhook", json=make_update(2, october)).status_code == 200
+    assert confirm_latest(client, calls, 100002).status_code == 200
     assert len(backend.documents) == 2
     assert sum(call.url.path.endswith("sendDocument") for call in calls) == 2
 
@@ -82,7 +102,7 @@ def test_duplicate_update_cannot_change_command(harness):
     assert client.post("/telegram/webhook", json=make_update()).status_code == 503
     altered = make_update(text=TEXT.replace("сентябрь", "октябрь"))
     assert client.post("/telegram/webhook", json=altered).status_code == 409
-    assert len(backend.documents) == 1 and len(calls) == 1
+    assert not backend.documents and len(calls) == 1
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
 
 
@@ -150,12 +170,13 @@ def test_voice_is_explicitly_unsupported_in_stage_one(harness):
 @pytest.mark.parametrize("failure", [500, 401, 429, "timeout", "malformed"])
 def test_telegram_failure_then_retry_never_duplicates_invoice(harness, failure, caplog):
     client, backend, calls, failures, settings = harness
-    failures.append(failure)
-    assert client.post("/telegram/webhook", json=make_update()).status_code == 503
-    assert len(backend.documents) == 1
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
-    assert len(backend.documents) == 1 and len(calls) == 2
-    assert [call.url.path.rsplit("/", 1)[-1] for call in calls] == ["sendDocument", "sendMessage"]
+    failures.append(failure)
+    assert confirm_latest(client, calls).status_code == 503
+    assert len(backend.documents) == 1
+    assert confirm_latest(client, calls).status_code == 200
+    assert len(backend.documents) == 1 and len(calls) == 3
+    assert [call.url.path.rsplit("/", 1)[-1] for call in calls] == ["sendMessage", "sendDocument", "sendMessage"]
     assert "Не удалось подтвердить доставку" in json.loads(calls[-1].content)["text"]
     assert settings.token.get_secret_value() not in caplog.text
     assert settings.webhook_secret.get_secret_value() not in caplog.text
@@ -164,10 +185,11 @@ def test_telegram_failure_then_retry_never_duplicates_invoice(harness, failure, 
 
 def test_bounded_delivery_attempts(harness):
     client, backend, calls, failures, _ = harness
+    assert client.post("/telegram/webhook", json=make_update()).status_code == 200
     failures.extend([500] * 10)
     for _ in range(6):
-        assert client.post("/telegram/webhook", json=make_update()).status_code == 503
-    assert len(calls) == 3 and len(backend.documents) == 1
+        assert confirm_latest(client, calls).status_code == 503
+    assert len(calls) == 4 and len(backend.documents) == 1
     assert sum(call.url.path.endswith("sendDocument") for call in calls) == 1
 
 
@@ -177,7 +199,7 @@ def test_capacity_fails_closed_and_preserves_existing_deduplication(harness, mon
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
     assert client.post("/telegram/webhook", json=make_update(2)).status_code == 503
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
-    assert len(calls) == len(backend.documents) == 1
+    assert len(calls) == 1 and not backend.documents
 
 
 def test_error_message_delivery_can_be_retried(harness):
@@ -252,6 +274,8 @@ def test_configured_fake_lost_response_recovers_through_webhook():
     calls = []
 
     def respond(request):
+        if request.url.path.endswith("answerCallbackQuery"):
+            return httpx.Response(200, json={"ok": True, "result": True})
         calls.append(request)
         return httpx.Response(200, json={"ok": True,
                                          "result": {"message_id": 50, "chat": {"id": 123}}})
@@ -260,10 +284,11 @@ def test_configured_fake_lost_response_recovers_through_webhook():
     with TestClient(app) as client:
         client.headers["X-Telegram-Bot-Api-Secret-Token"] = settings.webhook_secret.get_secret_value()
         assert client.post("/telegram/webhook", json=make_update(501)).status_code == 200
+        assert confirm_latest(client, calls).status_code == 200
         assert calls[-1].url.path.endswith("/sendMessage")
         assert client.post("/telegram/webhook", json=make_update(502, text="/retry")).status_code == 200
         assert calls[-1].url.path.endswith("/sendDocument")
-        assert len(calls) == 2
+        assert len(calls) == 3
 
 
 def test_fake_fault_setting_is_strict_and_defaults_disabled(monkeypatch):
@@ -294,11 +319,13 @@ def test_partial_failure_is_explained_and_new_command_resumes(harness, monkeypat
 
     monkeypatch.setattr(backend, method, lose_response)
     assert client.post("/telegram/webhook", json=make_update()).status_code == 200
+    assert not backend.documents
+    assert confirm_latest(client, calls).status_code == 200
     assert calls[0].url.path.endswith("/sendMessage")
-    text = json.loads(calls[0].content)["text"]
+    text = json.loads(calls[1].content)["text"]
     assert {"create": "проведение не завершено", "post": "проведён", "pdf": "PDF не получен"}[stage] in text
     assert client.post("/telegram/webhook", json=make_update(2, text="/retry")).status_code == 200
-    assert calls[1].url.path.endswith("/sendDocument")
+    assert calls[2].url.path.endswith("/sendDocument")
     assert len(backend.documents) == 1
 
 
@@ -322,7 +349,9 @@ def test_busy_request_fails_cleanly_without_parallel_mutation(harness, monkeypat
         finally:
             release.set()
         assert first.result(timeout=3).status_code == 200
-    assert len(backend.documents) == 1 and len(calls) == 1
+    assert not backend.documents and len(calls) == 1
+    assert confirm_latest(client, calls).status_code == 200
+    assert len(backend.documents) == 1
 
 
 def test_configuration_repr_does_not_expose_secrets(harness):

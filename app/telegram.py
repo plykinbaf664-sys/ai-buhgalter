@@ -47,11 +47,12 @@ class Telegram:
         except (ExternalFailure, ValueError, TypeError, AttributeError, RecursionError):
             return False
 
-    async def send_pdf(self, chat_id: int, pdf: bytes) -> None:
+    async def send_pdf(self, chat_id: int, pdf: bytes, *, is_mock: bool = True) -> None:
         await self._send(
             "sendDocument", chat_id,
-            data=DocumentRequest(chat_id=str(chat_id), caption="ТЕСТОВЫЙ РЕЖИМ: это mock-файл, не счёт из 1С.").model_dump(),
-            files={"document": ("mock-not-an-invoice.pdf", pdf, "application/pdf")},
+            data=DocumentRequest(chat_id=str(chat_id), caption=("TEST / MOCK: тестовый счёт с вымышленными данными. Не для оплаты."
+                if is_mock else "Счёт из 1С.")).model_dump(),
+            files={"document": ("test-invoice.pdf" if is_mock else "invoice.pdf", pdf, "application/pdf")},
         )
 
     async def download_voice(self, voice: Voice) -> AudioFile:

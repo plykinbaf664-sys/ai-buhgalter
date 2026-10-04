@@ -1,11 +1,10 @@
 import asyncio
-import re
 
 import pytest
 from pydantic import ValidationError
 
 from app.domain import Invoice, InvoiceCommand, UserProblem, WorkflowFailure
-from app.fake_onec import FAKE_PDF, FakeOneC
+from app.fake_onec import FakeOneC
 from app.parser import parse_command
 from app.service import InvoiceService
 
@@ -16,18 +15,25 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_static_pdf_fixture_has_consistent_stream_and_cross_references():
-    start = int(re.search(rb"startxref\n(\d+)", FAKE_PDF).group(1))
-    assert FAKE_PDF[start:].startswith(b"xref\n")
-    length = int(re.search(rb"/Length (\d+)", FAKE_PDF).group(1))
-    assert len(FAKE_PDF.split(b"stream\n", 1)[1].split(b"endstream", 1)[0]) == length
-    entries = re.findall(rb"(\d{10}) 00000 n", FAKE_PDF)
-    for number, offset in enumerate(entries, 1):
-        assert FAKE_PDF[int(offset):].startswith(f"{number} 0 obj\n".encode())
-
-
 def test_parse():
     assert parse_command(TEXT) == InvoiceCommand(client="ООО Ромашка", year=2026, month=9)
+
+
+def test_legacy_and_explicit_date_commands_share_monthly_uniqueness():
+    from datetime import date
+    from app.domain import ServicePeriod
+    async def scenario():
+        backend = FakeOneC()
+        service = InvoiceService(backend)
+        legacy = await service.prepare(parse_command(TEXT), "legacy", 1)
+        explicit = await service.prepare(InvoiceCommand(client="ООО Ромашка",
+            invoice_date=date(2026, 10, 1), service_period=ServicePeriod(year=2026, month=9)), "dated", 1)
+        assert legacy.operation_id == explicit.operation_id
+        await service.execute(legacy, "legacy", 1)
+        with pytest.raises(UserProblem):
+            await service.refresh(explicit, "dated", 1)
+        assert len(backend.documents) == 1
+    run(scenario())
 
 
 @pytest.mark.parametrize("text", [
