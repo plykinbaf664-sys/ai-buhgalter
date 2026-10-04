@@ -1,0 +1,9 @@
+[project]
+name = "ai-buhgalteria"
+version = "0.2.0"
+description = "Validated Telegram text and voice invoice workflow; fake 1C until integration is verified"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
