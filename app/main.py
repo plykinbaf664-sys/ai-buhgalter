@@ -13,6 +13,7 @@ from app.bot import Bot, Receipt
 from app.config import Settings
 from app.domain import OneC
 from app.fake_onec import FakeOneC
+from app.firstbit import FirstBit, FirstBitSettings
 from app.model_selection import OpenAIModelSelector
 from app.service import InvoiceService, event
 from app.telegram import DeliveryFailure, Telegram
@@ -24,9 +25,19 @@ MAX_RECEIPTS = 10_000
 
 def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                telegram_transport: httpx.AsyncBaseTransport | None = None,
-               ai_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
+               ai_transport: httpx.AsyncBaseTransport | None = None,
+               firstbit_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
+    owned_backend = None
+    if settings.mode == "firstbit_readonly":
+        if backend is not None:
+            if getattr(backend, "preview_only", False) is not True or backend.is_fake is not False:
+                raise ValueError("firstbit_readonly requires a real preview-only provider")
+        else:
+            owned_backend = FirstBit(FirstBitSettings.from_env(), transport=firstbit_transport)
+            backend = owned_backend
     service = InvoiceService(backend if backend is not None else FakeOneC(settings.fake_onec_fault),
+                             timeout=45 if settings.mode == "firstbit_readonly" else 5,
                              allow_real_writes=settings.onec_write_enabled)
     # Stage-1 mock only, bounded and never evicted during process lifetime.
     # Refuse overflow rather than silently forgetting deduplication records.
@@ -61,7 +72,9 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                 interpreter = (CommandInterpreter(
                     ai_client, settings.openai_api_key, settings.llm_model, sdk_client=openai_client,
                     model_selector=model_selector if settings.llm_model == "auto" else None,
-                ) if settings.ai_mode == "openai" else CommandInterpreter())
+                    send_draft_context=service.onec.is_fake is True,
+                ) if settings.ai_mode == "openai" else CommandInterpreter(
+                    send_draft_context=service.onec.is_fake is True))
                 speech = (SpeechToText(
                     ai_client, settings.openai_api_key, settings.stt_model, sdk_client=openai_client,
                     model_selector=model_selector if settings.stt_model == "auto" else None,
@@ -71,12 +84,14 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
             finally:
                 if openai_client is not None:
                     await openai_client.close()
+                if owned_backend is not None:
+                    await owned_backend.aclose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 
     @app.get("/healthz")
     async def health():
-        return Health()
+        return Health(mode=settings.mode)
 
     @app.post("/telegram/webhook")
     async def webhook(request: Request):

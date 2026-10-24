@@ -67,12 +67,54 @@ class TaxProfile(StrictModel):
         return self
 
 
+class PreviewTaxRequest(StrictModel):
+    mode: Literal["rate", "without_tax", "with_tax", "profile"]
+    rate: Decimal | None = Field(default=None, ge=0, le=100, decimal_places=3)
+    query: Label | None = None
+
+    @model_validator(mode="after")
+    def explicit_choice(self):
+        if (self.mode == "rate") != (self.rate is not None) or (self.mode == "profile") != (self.query is not None):
+            raise ValueError("Tax choice requires its exact rate or profile name")
+        return self
+
+
+class PreviewLineOverride(StrictModel):
+    line_number: int = Field(ge=1, le=20)
+    price: Money | None = None
+    description: Label | None = None
+    tax: PreviewTaxRequest | None = None
+
+    @model_validator(mode="after")
+    def nonempty(self):
+        if self.price is None and self.description is None and self.tax is None:
+            raise ValueError("Empty preview override")
+        return self
+
+
+class ResolvedPreviewLineOverride(PreviewLineOverride):
+    source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    def user_edit(self):
+        return PreviewLineOverride(**self.model_dump(exclude={"source_line_number"}))
+
+
+def tax_matches(request: PreviewTaxRequest, profile: TaxProfile) -> bool:
+    if request.mode == "rate":
+        return profile.rate == request.rate and profile.treatment == ("standard" if request.rate else "zero_rated")
+    if request.mode == "without_tax":
+        return profile.treatment == "exempt"
+    if request.mode == "with_tax":
+        return profile.rate > 0
+    return " ".join(profile.label.split()).casefold() == " ".join(request.query.split()).casefold()
+
+
 class PartyDetails(StrictModel):
     name: Label
-    address: Label
-    tax_number: Label
-    phone: Label
-    email: Label
+    address: Label | None = None
+    tax_number: Label | None = None
+    phone: Label | None = None
+    email: Label | None = None
 
 
 class BankDetails(StrictModel):
@@ -87,6 +129,27 @@ class PaymentTerms(StrictModel):
     delivery: Label
 
 
+class HistoricalProposal(StrictModel):
+    source_id: Label
+    source_number: Label
+    source_date: InvoiceDate
+    contract_id: Label
+    contract_name: Label
+    entity_id: Label
+    contract_entity_id: Label | None = None
+    contract_entity_name: Label | None = None
+    # This provenance is preview-only; it is never a create payload/default policy.
+    policy: Literal["historical_proposal_readonly"] = "historical_proposal_readonly"
+
+    @model_validator(mode="after")
+    def paired_entity_review(self):
+        if (self.contract_entity_id is None) != (self.contract_entity_name is None):
+            raise ValueError("Contract entity review requires both identity and display name")
+        if self.contract_entity_id == self.entity_id:
+            raise ValueError("An entity review must represent an actual mismatch")
+        return self
+
+
 class InvoiceLine(StrictModel):
     service_id: Label
     description: Label
@@ -97,6 +160,7 @@ class InvoiceLine(StrictModel):
     subtotal: Money
     tax_amount: Money
     total: Money
+    source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
 
     @model_validator(mode="after")
     def correct_totals(self):
@@ -107,26 +171,57 @@ class InvoiceLine(StrictModel):
             raise ValueError("Inconsistent invoice line amounts")
         return self
 
+    def overridden(self, edit: PreviewLineOverride, tax: TaxProfile | None = None):
+        if edit.tax is not None and (tax is None or not tax_matches(edit.tax, tax)):
+            raise UserProblem("Налоговая правка не подтверждена профилем 1С.")
+        price = self.price if edit.price is None else edit.price
+        profile = tax or self.tax
+        subtotal = (self.quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        amount = (subtotal * profile.rate / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        try:
+            return InvoiceLine(**{**self.model_dump(), "price": price, "tax": profile,
+                "description": edit.description if edit.description is not None else self.description,
+                "subtotal": subtotal, "tax_amount": amount, "total": subtotal + amount})
+        except ValueError:
+            raise UserProblem("Изменённая цена или налог дают недопустимую сумму. Проверьте строку.") from None
+
 
 class InvoicePreview(StrictModel):
     invoice_date: InvoiceDate
-    supply_date: InvoiceDate
+    supply_date: InvoiceDate | None = None
     service_period: ServicePeriod | None = None
     currency: Literal["AED", "USD", "EUR", "GBP", "RUB"]
     issuer: PartyDetails
     recipient: PartyDetails
-    bank: BankDetails
-    terms: PaymentTerms
+    bank: BankDetails | None
+    terms: PaymentTerms | None
     lines: tuple[InvoiceLine, ...] = Field(min_length=1, max_length=20)
     subtotal: Money
     tax_amount: Money
     total: Money
-    amount_in_words: Label
+    amount_in_words: Label | None = None
     reference: Label
     previous_reference: Label | None = None
+    historical_proposal: HistoricalProposal | None = None
+    user_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
 
     @model_validator(mode="after")
     def correct_totals(self):
+        if len({e.line_number for e in self.user_overrides}) != len(self.user_overrides):
+            raise ValueError("Duplicate manual row override")
+        for edit in self.user_overrides:
+            if edit.line_number > len(self.lines):
+                raise ValueError("Manual edit outside preview")
+            line = self.lines[edit.line_number - 1]
+            if (edit.price is not None and edit.price != line.price
+                    or edit.description is not None and edit.description != line.description
+                    or edit.tax is not None and not tax_matches(edit.tax, line.tax)):
+                raise ValueError("Preview does not reflect the explicit user edit")
+        if self.historical_proposal is None and (self.bank is None or self.terms is None
+                or self.supply_date is None or self.amount_in_words is None
+                or any(v is None for party in (self.issuer, self.recipient)
+                       for v in (party.address, party.tax_number, party.phone, party.email))):
+            raise ValueError("A non-historical invoice requires complete details")
         if (self.subtotal, self.tax_amount, self.total) != (
             sum((line.subtotal for line in self.lines), Decimal(0)),
             sum((line.tax_amount for line in self.lines), Decimal(0)),
@@ -152,9 +247,12 @@ class InvoiceCommand(StrictModel):
     tax: TaxRequest = TaxRequest()
     previous: Literal["none", "last", "previous_month", "usual"] = "none"
     legacy_period: bool = False
+    preview_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
 
     @model_validator(mode="after")
     def valid_period(self):
+        if len({e.line_number for e in self.preview_overrides}) != len(self.preview_overrides):
+            raise ValueError("Duplicate override row")
         if (self.year is None) != (self.month is None):
             raise ValueError("Incomplete service period")
         if self.service_period is not None and self.year is not None:
@@ -180,6 +278,21 @@ class ResolvedClient(StrictModel):
     display_name: str = Field(min_length=1, max_length=200)
 
 
+class ClientCandidate(ResolvedClient):
+    full_name: Label
+    tax_number: Label | None = None
+
+
+class ClientCandidates(StrictModel):
+    candidates: tuple[ClientCandidate, ...] = Field(min_length=1, max_length=19)
+
+    @model_validator(mode="after")
+    def unique_ids(self):
+        if len({c.client_id for c in self.candidates}) != len(self.candidates):
+            raise ValueError("Duplicate candidate identity")
+        return self
+
+
 class ResolvedInvoiceCommand(StrictModel):
     client_id: str = Field(min_length=1, max_length=200)
     year: int | None = Field(default=None, ge=2000, le=2100)
@@ -190,6 +303,8 @@ class ResolvedInvoiceCommand(StrictModel):
     tax: TaxRequest = TaxRequest()
     previous: Literal["none", "last", "previous_month", "usual"] = "none"
     legacy_period: bool = False
+    preview_overrides: tuple[ResolvedPreviewLineOverride, ...] = Field(default=(), max_length=20)
+    preview_source_id: Label | None = None
 
     @model_validator(mode="after")
     def valid_period(self):
@@ -223,6 +338,8 @@ class PreparedInvoice(StrictModel):
             raise ValueError("Resolved client does not match billing basis")
         if self.basis.preview is None:
             raise ValueError("A complete preview is required")
+        if tuple(e.user_edit() for e in self.request.preview_overrides) != self.preview.user_overrides:
+            raise ValueError("Provider dropped or changed explicit preview edits")
         if self.basis.preview.invoice_date != self.request.invoice_date:
             raise ValueError("Preview invoice date differs from request")
         if self.basis.preview.service_period != self.request.service_period:
@@ -295,6 +412,12 @@ class UserProblem(Exception):
     """Expected clarification, with an application-controlled safe message."""
 
 
+class ClientChoiceRequired(UserProblem):
+    def __init__(self, candidates: ClientCandidates):
+        self.choices = ClientCandidates.model_validate(candidates)
+        super().__init__("Нужно выбрать конкретную компанию из найденных записей.")
+
+
 class ServiceProblem(UserProblem):
     def __init__(self, message: str, line_number: int):
         self.line_number = line_number
@@ -330,8 +453,12 @@ class WorkflowFailure(Exception):
 class OneC(Protocol):
     is_fake: bool
 
-    async def resolve_client(self, query: str) -> ResolvedClient:
-        """Read only. Return exactly one stable 1C ID, or ask for clarification."""
+    async def resolve_client(self, query: str, *, selected_id: str | None = None) -> ResolvedClient:
+        """Read only. Return a unique ID or typed choices. Recheck an explicit selection.
+
+        selected_id comes only from a user's token-bound candidate choice, never AI.
+        It must still belong to fresh active candidates for the original query.
+        """
         ...
 
     async def resolve_service(self, client_id: str, query: str) -> ResolvedService:

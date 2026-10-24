@@ -46,9 +46,11 @@ class FakeOneC:
         self.previous_invoices: list[PreviousHint] = [PREVIOUS]
         self._lock = asyncio.Lock()
 
-    async def resolve_client(self, query: str) -> ResolvedClient:
+    async def resolve_client(self, query: str, *, selected_id: str | None = None) -> ResolvedClient:
         name = " ".join(query.casefold().replace('"', '').replace('«', '').replace('»', '').split())
         matches = [item for item in self.clients.values() if name in item.search_names or name == item.display_name.casefold()]
+        if selected_id is not None:
+            matches = [item for item in matches if item.client_id == selected_id]
         if len(matches) > 1:
             raise UserProblem("Найдено несколько клиентов. Уточните полное название и ИНН; документ не создан.")
         if not matches:
@@ -147,6 +149,21 @@ class FakeOneC:
             lines.append(InvoiceLine(service_id=service.service_id, description=service.description,
                          quantity=quantity, uom=service.uom, price=service.price, tax=tax,
                          subtotal=subtotal, tax_amount=vat, total=subtotal + vat))
+        from app.domain import tax_matches
+        for edit in command.preview_overrides:
+            if edit.line_number > len(lines):
+                raise UserProblem("В preview нет такой строки.")
+            line = lines[edit.line_number - 1]
+            selected_tax = None
+            if edit.tax is not None:
+                candidates = [t for t in self.taxes.values() if tax_matches(edit.tax, t)]
+                if tax_matches(edit.tax, line.tax):
+                    selected_tax = self.taxes[line.tax.tax_id]
+                elif len(candidates) == 1:
+                    selected_tax = candidates[0]
+                else:
+                    raise UserProblem("Налоговый профиль не найден однозначно в 1С.")
+            lines[edit.line_number - 1] = line.overridden(edit.user_edit(), selected_tax)
         subtotal = sum((line.subtotal for line in lines), Decimal(0))
         vat = sum((line.tax_amount for line in lines), Decimal(0))
         preview = InvoicePreview(invoice_date=command.invoice_date,
@@ -154,6 +171,7 @@ class FakeOneC:
                          if period else command.invoice_date), service_period=period, currency="AED",
             issuer=ISSUER, recipient=recipient(self.clients[command.client_id].display_name), bank=BANK, terms=TERMS,
             lines=tuple(lines), subtotal=subtotal, tax_amount=vat, total=subtotal+vat,
+            user_overrides=tuple(e.user_edit() for e in command.preview_overrides),
             amount_in_words=amount_words(subtotal+vat, "AED"),
             reference="TEST-" + hashlib.sha256(key.encode()).hexdigest()[:12].upper(),
             previous_reference=previous.reference if previous else None)

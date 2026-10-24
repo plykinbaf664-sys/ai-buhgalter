@@ -14,12 +14,21 @@ def quantity(value: Decimal) -> str:
 
 def preview_text(preview: InvoicePreview) -> str:
     preview = InvoicePreview.model_validate(preview)
+    if preview.historical_proposal is not None:
+        return historical_preview_text(preview)
     parts = ["Счёт к формированию", f"Компания: {preview.recipient.name}",
              f"Поставщик: {preview.issuer.name}", f"Дата счёта: {preview.invoice_date:%d.%m.%Y}",
-             f"Дата оказания услуги: {preview.supply_date:%d.%m.%Y}"]
+             "Дата оказания услуги: " + (f"{preview.supply_date:%d.%m.%Y}" if preview.supply_date else "не определена")]
     if preview.service_period:
         parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
-    if preview.previous_reference:
+    if preview.historical_proposal:
+        source = preview.historical_proposal
+        parts.extend((f"Договор: {source.contract_name} ({source.contract_id})",
+            f"Источник предложения: posted invoice {source.source_number} от {source.source_date:%d.%m.%Y}",
+            f"ID источника: {source.source_id}",
+            "Исторические цены, количества и НДС — предложение, а не действующий тариф. Проверьте каждую строку.",
+            "Банковские реквизиты, условия оплаты, дата оказания и налоговые реквизиты поставщика не определены для нового счёта. Запись заблокирована."))
+    elif preview.previous_reference:
         parts.append(f"Подсказка из предыдущего счёта: {preview.previous_reference}. Цены проверены заново в 1С.")
     for i, line in enumerate(preview.lines, 1):
         parts.extend(("", f"{i}. Услуга: {line.description}", f"Количество: {quantity(line.quantity)} {line.uom}",
@@ -30,12 +39,52 @@ def preview_text(preview: InvoicePreview) -> str:
     parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
                   f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
                   f"Итого: {money(preview.total)} {preview.currency}",
-                  f"Налоговый номер клиента: {preview.recipient.tax_number}",
-                  f"Банк: {preview.bank.bank}", f"IBAN: {preview.bank.iban}",
-                  f"SWIFT: {preview.bank.swift}", f"Получатель платежа: {preview.bank.beneficiary}",
-                  f"Условия оплаты: {preview.terms.payment}",
+                  f"Налоговый номер клиента: {preview.recipient.tax_number or 'не указан'}",
+                  *([f"Банк: {preview.bank.bank}", f"IBAN: {preview.bank.iban}",
+                     f"SWIFT: {preview.bank.swift or 'не определён'}", f"Получатель платежа: {preview.bank.beneficiary}"]
+                    if preview.bank else []),
+                  *([f"Условия оплаты: {preview.terms.payment}"] if preview.terms else []),
                   "", "Подтвердите, измените текстом/голосом или отмените. Подтверждение действует 5 минут."))
+    if preview.user_overrides:
+        parts.extend(("", manual_changes_text(preview)))
     return "\n".join(parts)
+
+
+def historical_preview_text(preview: InvoicePreview) -> str:
+    source = preview.historical_proposal
+    parts = ["Предварительный счёт", f"Компания: {preview.recipient.name}",
+             f"Поставщик по образцу: {preview.issuer.name}", f"Дата счёта: {preview.invoice_date:%d.%m.%Y}"]
+    if preview.service_period:
+        parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
+    parts.extend((f"Договор: {source.contract_name}",
+                  f"Образец: счёт №{source.source_number} от {source.source_date:%d.%m.%Y}"))
+    for i, line in enumerate(preview.lines, 1):
+        parts.extend(("", f"{i}. {line.description}",
+            f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}",
+            f"Без НДС: {money(line.subtotal)}; НДС {quantity(line.tax.rate)}% ({line.tax.label}): {money(line.tax_amount)}",
+            f"Сумма строки: {money(line.total)} {preview.currency}"))
+    parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
+                  f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
+                  f"Итого: {money(preview.total)} {preview.currency}", "",
+                  ("Основа — указанный счёт. Ручные изменения отмечены ниже; проверьте значения."
+                   if preview.user_overrides else "Цена и количество взяты из указанного счёта. Проверьте их актуальность.")))
+    if preview.user_overrides:
+        parts.append(manual_changes_text(preview))
+    if source.contract_entity_name:
+        parts.append(f"В договоре другая организация: {source.contract_entity_name}. "
+                     "Поставщик нового документа пока не подтверждён.")
+    parts.extend(("Для записи ещё нужны проверенные реквизиты, условия и дата оказания услуги.",
+                  "Можно изменить запрос текстом/голосом, проверить preview или отменить."))
+    return "\n".join(parts)
+
+
+def manual_changes_text(preview: InvoicePreview) -> str:
+    changes = []
+    for edit in preview.user_overrides:
+        fields = [label for field, label in (("price", "цена без НДС"), ("tax", "налог"), ("description", "название"))
+                  if getattr(edit, field) is not None]
+        changes.append(f"строка {edit.line_number}: {', '.join(fields)}")
+    return "Изменено пользователем — " + "; ".join(changes) + ". Только preview; это не изменение данных 1С."
 
 
 def message_chunks(text: str) -> tuple[str, ...]:

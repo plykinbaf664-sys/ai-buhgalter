@@ -5,7 +5,9 @@ from typing import Annotated, Literal
 
 from pydantic import Field, WithJsonSchema, model_validator
 
-from app.domain import InvoiceCommand, Quantity, ServicePeriod, ServiceSelection, StrictModel, TaxRequest, UserProblem
+from app.domain import (InvoiceCommand, Label, Money, PreviewLineOverride, PreviewTaxRequest,
+                        Quantity, ServicePeriod, ServiceSelection, StrictModel, TaxRequest, UserProblem)
+from app.numbers import explicit_decimal
 
 # Expose JSON numbers instead of Pydantic's Decimal string alternatives.
 # Exact Decimal bounds and precision are still checked at runtime.
@@ -55,6 +57,27 @@ class IntentService(StrictModel):
         return self
 
 
+class IntentPreviewChange(StrictModel):
+    line_number: int | None = Field(default=None, ge=1, le=20)
+    price: Money | None = None
+    price_evidence: str | None = Field(default=None, min_length=1, max_length=200)
+    currency: Literal["AED", "USD", "EUR", "GBP", "RUB"] | None = None
+    description: Label | None = None
+    tax: PreviewTaxRequest | None = None
+    tax_evidence: str | None = Field(default=None, min_length=1, max_length=1000)
+    rate_evidence: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def evidence_pairs(self):
+        if ((self.price is None) != (self.price_evidence is None)
+                or (self.tax is None) != (self.tax_evidence is None)
+                or (self.tax is not None and self.tax.mode == "rate") != (self.rate_evidence is not None)
+                or self.currency is not None and self.price is None
+                or self.price is None and self.description is None and self.tax is None):
+            raise ValueError("Preview change requires explicit grounded fields")
+        return self
+
+
 class InvoiceIntent(StrictModel):
     # Required nullable fields deliberately match the Structured Outputs contract.
     action: Literal["create", "edit", "cancel", "clarify", "reject"]
@@ -70,6 +93,7 @@ class InvoiceIntent(StrictModel):
     line_number: int | None = Field(default=None, ge=1, le=20)
     quantity: IntentQuantity | None = None
     quantity_evidence: str | None = Field(default=None, min_length=1, max_length=1000)
+    preview_changes: tuple[IntentPreviewChange, ...] = Field(default=(), max_length=20)
 
     @model_validator(mode="after")
     def consistent(self):
@@ -80,7 +104,7 @@ class InvoiceIntent(StrictModel):
         if self.services and self.line_number is not None and self.lines_mode == "add":
             raise ValueError("Adding a line cannot replace an existing line")
         if self.action in ("cancel", "reject") and any((self.client, self.invoice_date, self.service_period,
-                                                       self.services, self.tax, self.previous, self.quantity, self.line_number)):
+                                                       self.services, self.tax, self.previous, self.quantity, self.line_number, self.preview_changes)):
             raise ValueError("Non-action must not carry changes")
         return self
 
@@ -95,11 +119,13 @@ class InvoiceDraft(StrictModel):
     incomplete_date: CalendarInput | None = None
     legacy_period: bool = False
     unresolved_line: int | None = Field(default=None, ge=1, le=20)
+    preview_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
 
     @classmethod
     def from_command(cls, command: InvoiceCommand):
         return cls(client=command.client, invoice_date=command.invoice_date, service_period=command.period,
                    services=command.services, tax=command.tax, previous=command.previous,
+                   preview_overrides=command.preview_overrides,
                    legacy_period=command.legacy_period or (command.invoice_date is None and command.year is not None))
 
     def command(self) -> InvoiceCommand:
@@ -109,11 +135,22 @@ class InvoiceDraft(StrictModel):
             raise UserProblem("Укажите число для даты счёта. Остальные параметры сохранены.")
         return InvoiceCommand(client=self.client, invoice_date=self.invoice_date or date.today(),
                               service_period=self.service_period, services=self.services,
-                              tax=self.tax, previous=self.previous, legacy_period=self.legacy_period)
+                              tax=self.tax, previous=self.previous, legacy_period=self.legacy_period,
+                              preview_overrides=self.preview_overrides)
 
 
 def ground_intent(intent: InvoiceIntent, source: str, context: InvoiceDraft | None = None) -> InvoiceIntent:
     intent = InvoiceIntent.model_validate(intent)
+    for change in intent.preview_changes:
+        for evidence in (change.price_evidence, change.description, change.tax_evidence, change.rate_evidence):
+            if evidence is not None and evidence.casefold() not in source.casefold():
+                raise UserProblem("Не удалось подтвердить правку по вашему сообщению. Укажите её явно.")
+        if change.price is not None and explicit_decimal(change.price_evidence) != change.price:
+            raise UserProblem("Цена не совпала с вашим сообщением. Укажите её цифрами.")
+        if change.rate_evidence is not None and explicit_decimal(change.rate_evidence, places=3) != change.tax.rate:
+            raise UserProblem("Ставка НДС не совпала с вашим сообщением. Укажите её явно.")
+        if change.tax is not None and change.tax.query is not None and change.tax.query.casefold() not in source.casefold():
+            raise UserProblem("Уточните название налогового профиля.")
     if intent.client is not None and intent.client.casefold() not in source.casefold():
         if context is not None and context.client is not None and intent.client.casefold() == context.client.casefold():
             # A repeated known client is not a request to change it. Keep its stable
@@ -167,8 +204,12 @@ def merge_intent(draft: InvoiceDraft, intent: InvoiceIntent, *, today: date | No
     today = today or date.today()
     values = draft.model_dump()
     values["services"] = draft.services
+    values["preview_overrides"] = draft.preview_overrides
     if intent.client is not None:
         values["client"] = intent.client
+    if (intent.client is not None and draft.client is not None and intent.client.casefold() != draft.client.casefold()
+            or intent.services or intent.previous is not None):
+        values["preview_overrides"] = ()
     if intent.invoice_date is not None:
         values["legacy_period"] = False
         part = intent.invoice_date
@@ -228,6 +269,28 @@ def merge_intent(draft: InvoiceDraft, intent: InvoiceIntent, *, today: date | No
         values["services"] = tuple(services)
     if intent.tax is not None:
         values["tax"] = TaxRequest(mode=intent.tax.mode, query=intent.tax.query)
+    edits = {e.line_number: e for e in values["preview_overrides"]}
+    seen = set()
+    for change in intent.preview_changes:
+        count = len(values["services"])
+        if not count:
+            raise UserProblem("Сначала подготовьте preview, затем укажите цену, НДС или название строки.")
+        if change.line_number is None and (change.price is not None or change.description is not None) and count > 1:
+            raise UserProblem("В счёте несколько строк. Укажите номер строки для изменения цены или названия.")
+        targets = (change.line_number,) if change.line_number is not None else tuple(range(1, count + 1))
+        for number in targets:
+            if number > count:
+                raise UserProblem("В preview нет такой строки. Уточните её номер.")
+            updates = {k: getattr(change, k) for k in ("price", "description", "tax") if getattr(change, k) is not None}
+            for key in updates:
+                if (number, key) in seen:
+                    raise UserProblem("Для одной строки указано несколько изменений одного поля. Уточните одно значение.")
+                seen.add((number, key))
+            previous = edits.get(number)
+            edits[number] = PreviewLineOverride(**{**(previous.model_dump() if previous else {"line_number": number}), **updates})
+        if change.tax is not None:
+            values["tax"] = TaxRequest()
+    values["preview_overrides"] = tuple(edits[n] for n in sorted(edits))
     if len(values["services"]) > 20:
         raise UserProblem("В одном счёте поддерживается до 20 строк. Сократите список услуг; текущие данные сохранены.")
     # model_dump is a serialization boundary; immediately revalidate the edited draft.

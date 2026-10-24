@@ -138,4 +138,4 @@ class WebhookAck(StrictModel):
 
 class Health(StrictModel):
     status: Literal["ok"] = "ok"
-    mode: Literal["mock"] = "mock"
+    mode: Literal["mock", "firstbit_readonly"] = "mock"

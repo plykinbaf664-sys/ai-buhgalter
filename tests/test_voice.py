@@ -165,6 +165,19 @@ def test_download_path_cannot_escape_telegram(voice_harness, path):
     assert all("/file/bot" not in call.url.path for call in calls)
 
 
+def test_uncertain_voice_shows_user_transcript_but_never_logs_it_or_calls_llm(voice_harness, caplog):
+    client, backend, controls, calls, sent, _ = voice_harness
+    controls["score"] = -4.0
+    assert client.post("/telegram/webhook", json=voice_update()).status_code == 200
+    response = json.loads(sent[-1].content)
+    assert controls["text"] in response["text"]
+    assert "reply_markup" not in response
+    assert not backend.documents
+    assert not any(c.url.path.endswith("responses") for c in calls)
+    assert controls["text"] not in caplog.text
+    assert '"stage":"voice","status":"clarification"' in caplog.text
+
+
 def test_untrusted_user_voice_cannot_download_or_spend_ai(voice_harness):
     client, backend, _, calls, _, _ = voice_harness
     update = voice_update()

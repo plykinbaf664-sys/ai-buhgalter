@@ -361,6 +361,15 @@ def test_service_period_is_separate_and_date_edit_preserves_it(workflow):
     assert "05.10.2026" in pdf_text(workflow) and "30.09.2026" in pdf_text(workflow)
 
 
+def test_short_patch_does_not_reask_a_client_already_known_locally(workflow):
+    send(workflow, TEXT, initial())
+    send(workflow, "Поменяй дату на пятое", intent(action="clarify", clarification="client",
+        invoice_date=CalendarInput(day=5, month=None, year=None, evidence="пятое")), 2)
+    assert preview(workflow).invoice_date == date(2026, 10, 5)
+    assert preview(workflow).recipient.name
+
+
+
 def test_next_invoice_can_use_last_client_and_actual_previous_document(workflow):
     send(workflow, TEXT, initial())
     press(workflow, token(workflow))

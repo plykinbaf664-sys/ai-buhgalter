@@ -22,7 +22,7 @@ class Settings(StrictModel):
     token: SecretStr
     webhook_secret: SecretStr
     allowed_users: frozenset[UserId] = Field(min_length=1)
-    mode: Literal["mock"] = "mock"
+    mode: Literal["mock", "firstbit_readonly"] = "mock"
     onec_write_enabled: bool = False
     # One-shot failures for manual recovery checks. Safe only for the in-memory fake.
     fake_onec_fault: Literal["disabled", "create_lost_response", "post_lost_response"] = "disabled"
@@ -47,8 +47,10 @@ class Settings(StrictModel):
 
     @model_validator(mode="after")
     def ai_configuration(self):
-        if self.mode == "mock" and self.onec_write_enabled:
-            raise ValueError("ONEC_WRITE_ENABLED cannot be true while APP_MODE=mock")
+        if self.onec_write_enabled:
+            raise ValueError("ONEC_WRITE_ENABLED cannot be true in mock or firstbit_readonly mode")
+        if self.mode == "firstbit_readonly" and self.fake_onec_fault != "disabled":
+            raise ValueError("Fake faults are unavailable in firstbit_readonly mode")
         if self.ai_mode == "openai":
             if (self.openai_api_key is None or not self.openai_api_key.get_secret_value().strip()
                     or not self.llm_model.strip() or not self.stt_model.strip()):
