@@ -31,3 +31,25 @@ Thumbs.db
 tmp/
 temp/
 artifacts/
+
+# Local secrets
+.env
+.env.*
+!.env.example
+.local/firstbit/
+
+# Python local files
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local/dev files
+*.log
+.DS_Store
+.idea/
+.vscode/
