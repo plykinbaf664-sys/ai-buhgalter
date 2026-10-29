@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 from pydantic import SecretStr
 
 from app.ai import CommandInterpreter
+from app.ai import Extraction
 from app.domain import InvoiceCommand
 from app.http import ExternalFailure
 from app.model_selection import OpenAIModelSelector
@@ -91,8 +92,8 @@ def test_sdk_catalog_and_shared_pipeline_use_selected_models():
                 "id": "resp_test", "object": "response", "created_at": 1,
                 "status": "completed", "model": "gpt-4o-mini", "output": [{
                     "id": "msg_test", "type": "message", "role": "assistant", "status": "completed",
-                    "content": [{"type": "output_text", "text": InvoiceCommand(
-                        client="ООО Ромашка", year=2026, month=9,
+                    "content": [{"type": "output_text", "text": Extraction(
+                        action="create_invoice", client="ООО Ромашка", year=2026, month=9,
                     ).model_dump_json(), "annotations": []}],
                 }],
             })

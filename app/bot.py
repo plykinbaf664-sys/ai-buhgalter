@@ -1,24 +1,29 @@
+import asyncio
 import hmac
+from decimal import Decimal
 import re
 import secrets
 import time
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.ai import CommandInterpreter
-from app.domain import (ClientCandidates, ClientChoiceRequired, InvoiceCommand, PreparedInvoice,
+from app.domain import (ClientCandidate, ClientCandidates, ClientChoiceRequired, InvoiceCommand, PreparedInvoice, ResolvedClient,
+                        ServiceCandidates, ServiceChoiceRequired,
+                        InitialQuantityRequired,
                         Label, ServiceProblem, ServiceSelection, StrictModel, UserProblem, WorkflowFailure)
 from app.http import ExternalFailure
-from app.service import InvoiceService, event
+from app.service import InvoiceService, event, safe_backend_error
 from app.telegram import DeliveryFailure, Telegram
 from app.telegram_models import CallbackQuery, InlineButton, InlineKeyboardMarkup, Message
-from app.voice import SpeechToText
+from app.voice import SpeechToText, UncertainTranscript
 from app.intent import InvoiceDraft, InvoiceIntent, IntentPreviewChange, merge_intent
 from app.domain import PreviewTaxRequest
 from app.numbers import explicit_decimal, explicit_tax_rate
-from app.language import explicit_line_target
+from app.language import explicit_line_target, normalize_request_text, company_search_phrase, service_refinement_phrase
 from app.presentation import message_chunks, preview_text
+from app.parser import HELP
 
 
 class Receipt(BaseModel):
@@ -40,8 +45,32 @@ class Pending(StrictModel):
 
 class PendingClientChoice(StrictModel):
     token: str = Field(pattern=r"^[a-f0-9]{32}$")
-    command: InvoiceCommand
+    command: InvoiceCommand | None = None
+    draft: InvoiceDraft | None = None
     choices: ClientCandidates
+    expires_at: float
+
+    @model_validator(mode="after")
+    def one_request(self):
+        if (self.command is None) == (self.draft is None):
+            raise ValueError("Choice requires exactly one command or discovery draft")
+        if self.draft is not None and self.draft.client is None:
+            raise ValueError("Discovery requires a literal name query")
+        return self
+
+
+class PendingServiceChoice(StrictModel):
+    token: str = Field(pattern=r"^[a-f0-9]{32}$")
+    command: InvoiceCommand
+    line_number: int = Field(ge=1, le=20)
+    choices: ServiceCandidates
+    expires_at: float
+
+
+class PendingInitialQuantity(StrictModel):
+    token: str = Field(pattern=r"^[a-f0-9]{32}$")
+    command: InvoiceCommand
+    line_number: int = Field(ge=1, le=20)
     expires_at: float
 
 
@@ -76,6 +105,8 @@ class DraftContext(StrictModel):
     prepared: PreparedInvoice | None = None
     selected_client_id: str | None = Field(default=None, min_length=1, max_length=200)
     supplier_review: SupplierReviewScope | None = None
+    require_client_choice: bool = False
+    selected_service_ids: dict[int, str] = Field(default_factory=dict)
 
 
 class DeliveredInvoice(StrictModel):
@@ -85,7 +116,7 @@ class DeliveredInvoice(StrictModel):
 
 def failure_text(exc: WorkflowFailure) -> str:
     if exc.stage == "resolve":
-        return "Не удалось получить данные 1С. Создание документа не запускалось. Повторите позже."
+        return "Не удалось получить данные 1С. Создание документа не запускалось. Повторите чтение командой /retry — наговаривать запрос заново не нужно."
     if exc.stage == "write_disabled":
         return "Запись в настоящую 1С отключена. Обратитесь к оператору."
     if exc.stage == "stale":
@@ -107,6 +138,8 @@ class Bot:
         # One pending command per authorized user; no transcripts, audio or PDF stored.
         self.pending: dict[int, Pending] = {}
         self.client_choices: dict[int, PendingClientChoice] = {}
+        self.service_choices: dict[int, PendingServiceChoice] = {}
+        self.initial_quantities: dict[int, PendingInitialQuantity] = {}
         self.supplier_reviews: dict[int, Pending] = {}
         self.contexts: dict[int, DraftContext] = {}
         self.last_contexts: dict[int, DraftContext] = {}
@@ -123,6 +156,8 @@ class Bot:
         supplier_review = (previous_context.supplier_review if previous_context is not None
                            and previous_context.draft.client == command.client else None)
         command = InvoiceCommand.model_validate({**command.model_dump(),
+            "initial_overrides": (),
+            "preview_overrides": prepared.preview.user_overrides,
             "invoice_date": prepared.preview.invoice_date, "legacy_period": prepared.request.legacy_period,
             "service_period": prepared.request.service_period,
             "year": prepared.request.year, "month": prepared.request.month,
@@ -182,9 +217,10 @@ class Bot:
         event(request_id=request_id, user_id=uid, stage="supplier_review", status="accepted")
         return self.show_preview(uid, refreshed, context.command)
 
-    def show_client_choices(self, uid: int, command: InvoiceCommand, choices: ClientCandidates) -> ConfirmationPrompt:
+    def show_client_choices(self, uid: int, command: InvoiceCommand | None, choices: ClientCandidates,
+                            *, draft: InvoiceDraft | None = None) -> ConfirmationPrompt:
         pending = PendingClientChoice(token=secrets.token_hex(16), command=command,
-                                      choices=choices, expires_at=time.monotonic() + 300)
+                                      draft=draft, choices=choices, expires_at=time.monotonic() + 300)
         self.client_choices[uid] = pending
         self.pending.pop(uid, None)
         text = ["Выберите компанию из найденных вариантов:"]
@@ -213,17 +249,108 @@ class Bot:
             self.contexts.pop(uid, None)
             return "Выбор компании отменён. Документ не создавался."
         index = int(match[2]) - 1
+        return await self.select_client(uid, pending, index, request_id)
+
+    async def select_client(self, uid: int, pending: PendingClientChoice, index: int, request_id: str):
+        if (self.client_choices.get(uid) != pending or time.monotonic() > pending.expires_at
+                or uid in self.recoveries):
+            raise UserProblem("Выбор компании устарел. Повторите поиск.")
+        if index < 0:
+            raise UserProblem("Кнопка выбора компании недействительна.")
         if index >= len(pending.choices.candidates):
             raise UserProblem("Кнопка выбора компании недействительна.")
         candidate = pending.choices.candidates[index]
         self.client_choices.pop(uid)
-        self.contexts[uid] = DraftContext(draft=InvoiceDraft.from_command(pending.command),
+        draft = InvoiceDraft.from_command(pending.command) if pending.command is not None else pending.draft
+        self.contexts[uid] = DraftContext(draft=draft,
                                          selected_client_id=candidate.client_id)
         event(request_id=request_id, user_id=uid, stage="client_choice", status="selected")
         try:
+            if pending.command is None:
+                try:
+                    fresh = ResolvedClient.model_validate(await asyncio.wait_for(
+                        self.service.onec.resolve_client(draft.client, selected_id=candidate.client_id), self.service.timeout))
+                    if fresh.client_id != candidate.client_id:
+                        raise ValueError("Selected identity changed")
+                except UserProblem:
+                    self.contexts.pop(uid, None)
+                    raise
+                except Exception as exc:
+                    self.contexts.pop(uid, None)
+                    event(request_id=request_id, user_id=uid, stage="company_search", status="error", error=safe_backend_error(exc))
+                    raise WorkflowFailure("resolve", None) from None
+                if draft.invoice_date is None and draft.service_period is None:
+                    return f"Компания выбрана: {fresh.display_name}. Укажите дату счёта или период услуг."
+                try:
+                    command = draft.command()
+                except UserProblem:
+                    return f"Компания выбрана: {fresh.display_name}. Укажите дату счёта или период услуг."
+                return await self.prepare_command(uid, command, request_id)
             return await self.prepare_command(uid, pending.command, request_id)
         except UserProblem as exc:
             raise UserProblem("Компания выбрана. " + str(exc)) from None
+
+    def show_service_choices(self, uid: int, command: InvoiceCommand, exc: ServiceChoiceRequired):
+        pending = PendingServiceChoice(token=secrets.token_hex(16), command=command, line_number=exc.line_number,
+            choices=exc.choices, expires_at=time.monotonic() + 300)
+        self.service_choices[uid] = pending
+        context = self.contexts[uid]
+        draft = InvoiceDraft(**{**context.draft.model_dump(), "unresolved_line": exc.line_number})
+        self.contexts[uid] = DraftContext(**{**context.model_dump(), "draft": draft})
+        self.pending.pop(uid, None)
+        buttons = [[InlineButton(text=(f"{i}. {item.display_name[:45]}" + (f" · {item.code}" if item.code else ""))[:64],
+            callback_data=f"service:{pending.token}:{i}")] for i, item in enumerate(exc.choices.candidates, 1)]
+        buttons.append([InlineButton(text="Отмена", callback_data=f"service:{pending.token}:cancel")])
+        return ConfirmationPrompt(text=f"Выберите услугу для строки {exc.line_number}:\n" + "\n".join(
+            f"{i}. {item.display_name}" + (f" · код {item.code}" if item.code else f" · запись {item.service_id}")
+            for i, item in enumerate(exc.choices.candidates, 1))
+            + "\nСуммы и остальные параметры сохранены.", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    async def choose_service(self, callback: CallbackQuery, request_id: str):
+        uid = callback.sender.id
+        match = re.fullmatch(r"service:([a-f0-9]{32}):([1-5]|cancel)", callback.data)
+        pending = self.service_choices.get(uid)
+        if (match is None or pending is None or uid in self.recoveries
+                or time.monotonic() > pending.expires_at or not hmac.compare_digest(match[1], pending.token)):
+            raise UserProblem("Выбор услуги устарел или недействителен. Повторите запрос.")
+        if match[2] == "cancel":
+            self.service_choices.pop(uid)
+            self.contexts.pop(uid, None)
+            return "Выбор услуги отменён. Документ не создавался."
+        index = int(match[2]) - 1
+        return await self.select_service(uid, pending, index, request_id)
+
+    async def select_service(self, uid: int, pending: PendingServiceChoice, index: int, request_id: str):
+        if (self.service_choices.get(uid) != pending or uid in self.recoveries
+                or time.monotonic() > pending.expires_at):
+            raise UserProblem("Выбор услуги устарел. Повторите запрос.")
+        if index < 0 or index >= len(pending.choices.candidates):
+            raise UserProblem("Недействительный номер услуги.")
+        self.service_choices.pop(uid)
+        context = self.contexts[uid]
+        selected = {**context.selected_service_ids, pending.line_number: pending.choices.candidates[index].service_id}
+        self.contexts[uid] = DraftContext(**{**context.model_dump(), "selected_service_ids": selected})
+        event(request_id=request_id, user_id=uid, stage="service_choice", status="selected")
+        return await self.prepare_command(uid, pending.command, request_id)
+
+    async def search_company(self, uid: int, draft: InvoiceDraft, request_id: str):
+        """Directory discovery before requiring a complete financial command."""
+        self.pending.pop(uid, None)
+        self.contexts[uid] = DraftContext(draft=draft)
+        try:
+            client = ResolvedClient.model_validate(await asyncio.wait_for(
+                self.service.onec.resolve_client(draft.client), self.service.timeout))
+            choices = ClientCandidates(candidates=(ClientCandidate(client_id=client.client_id,
+                display_name=client.display_name, full_name=client.display_name),))
+        except ClientChoiceRequired as exc:
+            choices = exc.choices
+        except UserProblem:
+            raise
+        except Exception as exc:
+            event(request_id=request_id, user_id=uid, stage="company_search", status="error", error=safe_backend_error(exc))
+            raise WorkflowFailure("resolve", None) from None
+        event(request_id=request_id, user_id=uid, stage="company_search", status="candidates")
+        return self.show_client_choices(uid, None, choices, draft=draft)
 
     async def confirm(self, uid: int, pending: Pending, request_id: str):
         if uid in self.recoveries:
@@ -250,6 +377,28 @@ class Bot:
         return pending.prepared
 
     async def prepare_callback(self, callback: CallbackQuery, request_id: str):
+        if callback.data.startswith("initialqty:"):
+            uid = callback.sender.id
+            match = re.fullmatch(r"initialqty:([a-f0-9]{32}):(one|edit|cancel)", callback.data)
+            pending = self.initial_quantities.get(uid)
+            if (not match or pending is None or uid in self.recoveries or time.monotonic() > pending.expires_at
+                    or not hmac.compare_digest(match[1], pending.token)):
+                raise UserProblem("Выбор количества устарел. Повторите запрос.")
+            self.initial_quantities.pop(uid)
+            if match[2] == "cancel":
+                self.contexts.pop(uid, None)
+                return "Запрос отменён. Документ не создавался."
+            if match[2] == "edit":
+                return f"Укажите количество для строки {pending.line_number}, например «Во второй строке количество 1». Остальные параметры сохранены."
+            services = list(pending.command.services)
+            selection = services[pending.line_number - 1]
+            services[pending.line_number - 1] = ServiceSelection(query=selection.query, quantity=Decimal('1'))
+            command = InvoiceCommand(**{**pending.command.model_dump(), "services": tuple(services)})
+            context = self.contexts[uid]
+            self.contexts[uid] = DraftContext(**{**context.model_dump(), "draft": InvoiceDraft.from_command(command)})
+            return await self.prepare_command(uid, command, request_id)
+        if callback.data.startswith("service:"):
+            return await self.choose_service(callback, request_id)
         if callback.data.startswith("supplier:"):
             return await self.review_supplier(callback, request_id)
         if callback.data.startswith("client:"):
@@ -281,12 +430,15 @@ class Bot:
             return await self.prepare_callback(message, request_id)
         uid = message.sender.id
         # A new message revokes selection buttons before parsing/downloading.
-        self.client_choices.pop(uid, None)
+        previous_choice = self.client_choices.pop(uid, None)
+        previous_service = self.service_choices.pop(uid, None)
+        self.initial_quantities.pop(uid, None)
         self.supplier_reviews.pop(uid, None)
         pending = self.pending.get(uid)
         if pending is not None and time.monotonic() > pending.expires_at:
             self.pending.pop(uid)
         is_voice = message.voice is not None
+        uncertain_voice = None
         if is_voice:
             if uid in self.recoveries:
                 raise UserProblem("Сначала восстановите предыдущую операцию командой /retry. Новый счёт пока не создаём.")
@@ -304,6 +456,13 @@ class Bot:
             except ExternalFailure as exc:
                 event(request_id=request_id, user_id=uid, stage="voice", status="error", error=exc.code)
                 raise
+            except UncertainTranscript as exc:
+                if getattr(self.service.onec, "preview_only", False) is not True:
+                    event(request_id=request_id, user_id=uid, stage="voice", status="clarification")
+                    raise
+                uncertain_voice = exc
+                transcript = exc.transcript
+                event(request_id=request_id, user_id=uid, stage="voice", status="uncertain")
             except UserProblem:
                 event(request_id=request_id, user_id=uid, stage="voice", status="clarification")
                 raise
@@ -312,6 +471,15 @@ class Bot:
             text = message.text
         else:
             raise UserProblem("Пришлите текст или голосовое сообщение с командой создания счёта.")
+        if len(text) <= 1000 and not any(ord(char) < 32 and not char.isspace() for char in text):
+            text = normalize_request_text(text)
+        if previous_choice is not None and not is_voice and re.fullmatch(r"[1-9]|1[0-9]", text):
+            # The numeric reply is scoped to this user's current expiring prompt.
+            self.client_choices[uid] = previous_choice
+            return await self.select_client(uid, previous_choice, int(text) - 1, request_id)
+        if previous_service is not None and not is_voice and re.fullmatch(r"[1-5]", text):
+            self.service_choices[uid] = previous_service
+            return await self.select_service(uid, previous_service, int(text) - 1, request_id)
         if not is_voice and text in ("/start", "/help"):
             return ("Подготовка счёта по данным 1С.\n"
                     "Например: Сформируй счёт Ромашке на 1 октября за бухгалтерское обслуживание с НДС.\n"
@@ -331,6 +499,13 @@ class Bot:
             return "Ожидающая подтверждения команда отменена."
         if not is_voice and text == "/retry":
             if uid not in self.recoveries:
+                context = self.contexts.get(uid)
+                if getattr(self.service.onec, "preview_only", False) is True and context is not None:
+                    self.pending.pop(uid, None)
+                    if (context.draft.client is not None and context.draft.invoice_date is None
+                            and context.draft.service_period is None):
+                        return await self.search_company(uid, context.draft, request_id)
+                    return await self.prepare_command(uid, context.draft.command(), request_id, context)
                 return "Нет незавершённой операции для восстановления."
             return self.recoveries[uid]
         if uid in self.recoveries:
@@ -346,8 +521,47 @@ class Bot:
         context = self.contexts.get(uid)
         # Any attempted edit revokes the old confirmation before parsing/resolution.
         self.pending.pop(uid, None)
+        if getattr(self.service.onec, "preview_only", False) is True:
+            query = service_refinement_phrase(text) if previous_service is not None else company_search_phrase(text)
+            if query is not None:
+                if previous_service is not None:
+                    services = list(previous_service.command.services)
+                    original = services[previous_service.line_number - 1]
+                    services[previous_service.line_number - 1] = ServiceSelection(query=query, quantity=original.quantity)
+                    command = InvoiceCommand(**{**previous_service.command.model_dump(), "services": tuple(services)})
+                    saved = self.contexts[uid]
+                    selected = {number: key for number, key in saved.selected_service_ids.items()
+                        if number != previous_service.line_number}
+                    self.contexts[uid] = DraftContext(draft=InvoiceDraft.from_command(command),
+                        selected_client_id=saved.selected_client_id, selected_service_ids=selected)
+                    return await self.prepare_command(uid, command, request_id)
+                if previous_choice is not None and previous_choice.command is not None:
+                    command = InvoiceCommand.model_validate({**previous_choice.command.model_dump(), "client": query})
+                    self.contexts[uid] = DraftContext(draft=InvoiceDraft.from_command(command))
+                    return await self.prepare_command(uid, command, request_id)
+                base = previous_choice.draft if previous_choice is not None and previous_choice.draft is not None else InvoiceDraft()
+                return await self.search_company(uid, InvoiceDraft.model_validate({**base.model_dump(), "client": query}), request_id)
         language_context = context or self.last_contexts.get(uid)
-        interpretation = await self.interpreter.interpret(text, language_context.draft if language_context else None)
+        try:
+            interpretation = await self.interpreter.interpret(text, language_context.draft if language_context else None)
+        except ExternalFailure as exc:
+            if is_voice and exc.code in ("openai_timeout", "openai_api_error"):
+                event(request_id=request_id, user_id=uid, stage="interpret", status="error", error=exc.code)
+                raise UserProblem("Голос распознан:\n«" + text + "»\n\n"
+                    "Сервис разбора команды не ответил. Документ не создавался. "
+                    "Этот текст можно отправить повторно, не записывая голос заново.") from None
+            raise
+        event(request_id=request_id, user_id=uid, stage="interpret", status="parsed")
+        if uncertain_voice is not None:
+            intent = interpretation.intent
+            # Never apply uncertain speech as an edit or financial override. A new
+            # readonly proposal must first pass an explicit company selection.
+            if interpretation.command is None and (intent is None or intent.action != "create"
+                    or intent.client is None or intent.preview_changes
+                    or any(e.price is not None or e.amount is not None or e.tax is not None for e in intent.initial_overrides)):
+                raise uncertain_voice
+            if interpretation.command is not None and interpretation.command.preview_overrides:
+                raise uncertain_voice
         if interpretation.command is not None:
             command = interpretation.command
             context = None
@@ -361,7 +575,8 @@ class Bot:
             if context is None and intent.client is None:
                 context = self.last_contexts.get(uid)
             if (intent.tax is not None and intent.tax.mode != "default" and context is not None
-                    and context.prepared is not None and getattr(self.service.onec, "preview_only", False) is True):
+                    and (context.prepared is not None or context.draft.initial_overrides)
+                    and getattr(self.service.onec, "preview_only", False) is True):
                 tax = intent.tax
                 request = PreviewTaxRequest(mode=tax.mode, query=tax.query)
                 rate_evidence = None
@@ -381,11 +596,19 @@ class Bot:
                         line_number=explicit_line_target(text, text.casefold().index(tax.evidence.casefold())),
                         tax_evidence=tax.evidence, rate_evidence=rate_evidence),)})
             if intent.preview_changes:
-                if (context is None or context.prepared is None or intent.action == "create"
+                # The model may label an explicit field patch as "create" even with a
+                # prepared local draft. Repair only the action, never values or scope.
+                new_scope = re.search(r"\b(?:нов\w*|друг\w*)\s+сч[её]т\b|"
+                    r"\b(?:сформир\w*|созд\w*|выстав\w*|подготов\w*|сдела\w*)\b.*\bсч[её]т\b|"
+                    r"\b(?:для|компани\w*|клиент\w*|контрагент\w*)\b", text, re.I)
+                if (intent.action == "create" and intent.client is None and context is not None
+                        and (context.prepared is not None or context.draft.initial_overrides) and not new_scope):
+                    intent = InvoiceIntent.model_validate({**intent.model_dump(), "action": "edit"})
+                if (context is None or context.prepared is None and not context.draft.initial_overrides or intent.action == "create"
                         or intent.client is not None and intent.client.casefold() != context.draft.client.casefold()):
                     raise UserProblem("Сначала подготовьте preview для нужной компании, затем измените его цену, НДС или название.")
                 for change in intent.preview_changes:
-                    if change.currency is not None and change.currency != context.prepared.preview.currency:
+                    if context.prepared is not None and change.currency is not None and change.currency != context.prepared.preview.currency:
                         raise UserProblem(f"В preview валюта {context.prepared.preview.currency}. Укажите цену в этой валюте; конвертация не выполняется.")
             base = context.draft if context else InvoiceDraft()
             if intent.action == "create" and intent.client is not None:
@@ -396,7 +619,9 @@ class Bot:
                                             selected_client_id=context.selected_client_id if context
                                                 and draft.client == context.draft.client else None,
                                             supplier_review=context.supplier_review if context
-                                                and draft.client == context.draft.client else None)
+                                                and draft.client == context.draft.client else None,
+                                            selected_service_ids=context.selected_service_ids if context
+                                                and draft.client == context.draft.client and draft.services == context.draft.services else {})
             if intent.action == "clarify":
                 messages = {"client": "Уточните компанию.", "date": "Уточните дату счёта.",
                             "service": "Уточните название услуги.", "tax": "Уточните налоговый режим.",
@@ -405,21 +630,55 @@ class Bot:
                                  "date": draft.invoice_date is not None and draft.incomplete_date is None,
                                  "service": bool(draft.services)}
                 if not known_locally.get(intent.clarification, False):
+                    if (getattr(self.service.onec, "preview_only", False) is True and draft.client is not None
+                            and self.contexts[uid].selected_client_id is None and intent.clarification == "date"):
+                        return await self.search_company(uid, draft, request_id)
                     raise UserProblem(messages.get(intent.clarification, "Уточните недостающий параметр.") + " Остальные данные сохранены.")
-            command = draft.command()
+            try:
+                command = draft.command()
+            except UserProblem:
+                if (getattr(self.service.onec, "preview_only", False) is True and draft.client is not None
+                        and draft.invoice_date is None and draft.service_period is None
+                        and self.contexts[uid].selected_client_id is None and not draft.preview_overrides):
+                    return await self.search_company(uid, draft, request_id)
+                raise
         if context is None:
             self.contexts[uid] = DraftContext(draft=InvoiceDraft.from_command(command))
-        return await self.prepare_command(uid, command, request_id, context)
+        if uncertain_voice is not None:
+            self.contexts[uid] = DraftContext.model_validate({**self.contexts[uid].model_dump(),
+                "require_client_choice": True})
+        result = await self.prepare_command(uid, command, request_id, context)
+        if uncertain_voice is not None and isinstance(result, ConfirmationPrompt):
+            result = ConfirmationPrompt(text=("Я услышал неуверенно: «" + text + "»\n"
+                "Выберите компанию ниже. Затем проверьте дату, количество и налог в preview.\n\n" + result.text),
+                reply_markup=result.reply_markup)
+        return result
 
     async def prepare_command(self, uid: int, command: InvoiceCommand, request_id: str,
                               context: DraftContext | None = None) -> ConfirmationPrompt:
         try:
             prepared = await self.service.prepare(command, request_id, uid,
                 existing=context.prepared if context else None, old_command=context.command if context else None,
-                selected_client_id=self.contexts[uid].selected_client_id)
+                selected_client_id=self.contexts[uid].selected_client_id,
+                require_client_choice=self.contexts[uid].require_client_choice,
+                selected_service_ids=self.contexts[uid].selected_service_ids)
         except ClientChoiceRequired as exc:
             event(request_id=request_id, user_id=uid, stage="client_choice", status="required")
             return self.show_client_choices(uid, command, exc.choices)
+        except ServiceChoiceRequired as exc:
+            event(request_id=request_id, user_id=uid, stage="service_choice", status="required")
+            return self.show_service_choices(uid, command, exc)
+        except InitialQuantityRequired as exc:
+            pending = PendingInitialQuantity(token=secrets.token_hex(16), command=command,
+                line_number=exc.line_number, expires_at=time.monotonic() + 300)
+            self.initial_quantities[uid] = pending
+            return ConfirmationPrompt(text=(f"Строка {exc.line_number}: указана сумма без НДС {exc.amount}. "
+                f"В образце количество {exc.quantity} {exc.uom}; с ним цена до копейки не даёт точную сумму. "
+                "Использовать количество 1? Сумма и налоговый запрос сохранятся."),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineButton(text="Количество 1", callback_data=f"initialqty:{pending.token}:one")],
+                    [InlineButton(text="Уточнить текстом", callback_data=f"initialqty:{pending.token}:edit")],
+                    [InlineButton(text="Отмена", callback_data=f"initialqty:{pending.token}:cancel")]]))
         except ServiceProblem as exc:
             saved = self.contexts[uid]
             draft = InvoiceDraft.model_validate({**saved.draft.model_dump(), "unresolved_line": exc.line_number})
@@ -480,8 +739,12 @@ class Bot:
                               document_id=result.invoice.document_id)
                         return
         except UserProblem as exc:
-            event(request_id=request_id, user_id=uid, stage=stage, status="clarification")
-            receipt.response_text = str(exc)
+            unparsed = str(exc) == HELP
+            event(request_id=request_id, user_id=uid, stage=stage, status="clarification",
+                  error="request_not_understood" if unparsed else None)
+            receipt.response_text = ("Не удалось разобрать запрос целиком. Напишите или произнесите название компании отдельно — "
+                "я найду варианты. Дату и услуги можно уточнить после выбора."
+                if unparsed and getattr(self.service.onec, "preview_only", False) is True else str(exc))
         except WorkflowFailure as exc:
             if exc.stage == "stale" and exc.state == "not_started" and receipt.prepared is not None:
                 try:

@@ -8,7 +8,7 @@
 | Метод | Вход → выход (Pydantic) | Обязательная гарантия |
 |---|---|---|
 | `resolve_client` | имя/описание пользователя, optional internal `selected_id` → `ResolvedClient` | Только чтение; единственное точное совпадение или `ClientChoiceRequired(ClientCandidates)`. Явный выбор повторно проверяется по свежим активным кандидатам исходного запроса |
-| `resolve_service` | `client_id`, название услуги → `ResolvedService` | Только чтение; один допустимый стабильный ID услуги, иначе уточнение |
+| `resolve_service` | `client_id`, название услуги, optional internal `selected_id` → `ResolvedService` | Только чтение; один допустимый стабильный ID услуги или typed ServiceChoiceRequired; выбранный ID проверяется по исходному запросу |
 | `resolve_basis` | `ResolvedInvoiceCommand` → `BillingBasis` с `InvoicePreview` | Только чтение; стабильные ID, revision и полный типизированный snapshot дат/реквизитов/строк/цен/налогов/итогов |
 | `read_operation` | `BillingBasis`, operation ID → `OperationState` | Авторитетное чтение перед записью; `unknown` нельзя трактовать как `not_started` |
 | `ensure_draft` | `BillingBasis`, operation ID → `Invoice` | Атомарно найти/создать один документ для основания; проверить актуальность revision перед записью |
@@ -16,6 +16,7 @@
 | `get_pdf` | `Invoice` → `PdfDocument` | Только штатная печатная форма 1С для существующего проведённого документа |
 
 Пользовательские названия используются только в read-only поиске клиента/услуг.
+FirstBit read transport допускает один дополнительный идентичный GET при сетевом transport error/timeout; HTTP status/auth и schema/financial validation не повторяются. Это не разрешает повтор mutation и не заменяет read-only reconcile после uncertain create/post. Все write guards сохранены.
 FirstBit company search выполняется локально по свежим ограниченным name-only страницам (200, максимум 5000, fixed skip/order/filter). Единственный exact key игнорирует регистр, пробелы и пунктуацию; транслитерация/произнесённые буквы/опечатки/частичные имена всегда требуют кнопки (до 5 похожих вариантов). Неполная выборка не даёт права выбирать автоматически. После выбора полная активная запись перечитывается и проверяется по исходному запросу; raw text не входит в company OData. Дословный fallback фразы «счёт для …» разрешает пропуск имени моделью, не придумывает имя/ID. [Правила поиска](firstbit/COMPANY_SEARCH.md).
 Неоднозначные/частичные результаты поиска FirstBit возвращаются как typed `ClientCandidates` (1–19 уникальных записей), а не выбираются автоматически. Bot хранит исходный `InvoiceCommand`, случайный token, кандидатов и срок 5 минут отдельно для каждого пользователя. Callback передаёт только token и номер; `selected_id` извлекается из сохранённого кандидата, не из текста или LLM. Выбор не подтверждает цену/договор и не разрешает запись. Новый текст/voice, отмена и restart отзывают кнопки; повторная доставка использует существующий receipt. Кандидаты и FirstBit IDs не отправляются в AI.
 После успешного поиска `PreparedInvoice.request` содержит стабильные ID и количества,

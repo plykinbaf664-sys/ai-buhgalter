@@ -49,7 +49,10 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
         logging.basicConfig(level=logging.INFO, format="%(message)s")
         logging.getLogger("invoices").setLevel(logging.INFO)
         async with httpx.AsyncClient(
-            transport=telegram_transport, timeout=httpx.Timeout(10, connect=3),
+            # HTTPX retries only failures establishing a connection, before sending
+            # an HTTP request. Lost read/write responses (including PDF) never retry.
+            transport=telegram_transport if telegram_transport is not None else httpx.AsyncHTTPTransport(retries=1, trust_env=False),
+            timeout=httpx.Timeout(10, connect=3),
             follow_redirects=False, trust_env=False,
         ) as client, httpx.AsyncClient(
             transport=ai_transport, timeout=httpx.Timeout(20, connect=3),

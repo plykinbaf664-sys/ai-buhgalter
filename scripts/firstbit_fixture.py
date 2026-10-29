@@ -22,7 +22,7 @@ def synthetic_metadata():
             "Edm.Guid": "Ref_Key Owner_Key Entity_Key AccountsCurrency_Key",
             "Edm.Boolean": "DeletionMark Inactive", "Edm.String": "Description"},
         "Catalog_Items": {"Edm.Guid": "Ref_Key", "Edm.Boolean": "DeletionMark IsFolder Inactive",
-            "Edm.String": "Description ItemType"},
+            "Edm.String": "Description ItemType Code"},
         "Catalog_Entities": {"Edm.Guid": "Ref_Key", "Edm.Boolean": "DeletionMark",
             "Edm.String": "Description DescriptionFull"},
         "Catalog_Currencies": {"Edm.Guid": "Ref_Key", "Edm.Boolean": "DeletionMark", "Edm.String": "Code Description"},
@@ -64,7 +64,7 @@ class FirstBitFixture:
             "Catalog_CompanyContracts": [{"Ref_Key": ref(2), "DeletionMark": False, "Owner_Key": ref(1),
                 "Inactive": False, "Description": "Synthetic contract", "Entity_Key": ref(3), "AccountsCurrency_Key": ref(4)}],
             "Catalog_Items": [{"Ref_Key": ref(5), "DeletionMark": False, "IsFolder": False, "Inactive": False,
-                "Description": "Accounting and bookkeeping services", "ItemType": "Service"}],
+                "Description": "Accounting and bookkeeping services", "ItemType": "Service", "Code": "SYN-001"}],
             "Catalog_Entities": [{"Ref_Key": ref(3), "DeletionMark": False, "Description": "Synthetic issuer",
                 "DescriptionFull": "Synthetic issuer"}],
             "Catalog_Currencies": [{"Ref_Key": ref(4), "DeletionMark": False, "Description": "UAE Dirham", "Code": "784"}],
@@ -90,6 +90,7 @@ class FirstBitFixture:
             "AutomaticDiscountRate": "0", "AutomaticDiscountAmount": "0"}
 
     def respond(self, request):
+        import re
         self.calls.append(request)
         assert request.method == "GET", "Mutation attempted"
         if self.status is not None:
@@ -101,10 +102,14 @@ class FirstBitFixture:
             return httpx.Response(200, content=self.metadata)
         rows = copy.deepcopy(self.records[name])
         filter = request.url.params["$filter"]
+        description = re.search(r"Description eq '((?:[^']|'')*)'", filter)
+        if name == "Catalog_Items" and description:
+            literal = description[1].replace("''", "'")
+            rows = [row for row in rows if row['Description'].casefold() == literal.casefold()]
         if filter.startswith("Ref_Key eq guid'"):
             key = filter.split("'")[1]
             rows = [r for r in rows if r["Ref_Key"] == key]
-        if name == "Catalog_Companies" and "$skip" in request.url.params:
+        if name in ("Catalog_Companies", "Catalog_Items") and "$skip" in request.url.params:
             rows.sort(key=lambda r: r["Ref_Key"])
             skip, top = int(request.url.params["$skip"]), int(request.url.params["$top"])
             rows = rows[skip:skip + top]

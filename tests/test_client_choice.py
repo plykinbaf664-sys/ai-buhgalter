@@ -291,3 +291,178 @@ def test_supplier_review_delivery_retry_does_not_repeat_resolution(flow):
     count = len(flow[1].calls)
     assert press(flow, data, number=3).status_code == 200
     assert len(flow[1].calls) == count
+
+
+@pytest.mark.parametrize("duplicate", [False, True])
+def test_uncertain_readonly_voice_requires_company_choice_before_history(flow, monkeypatch, caplog, duplicate):
+    from types import SimpleNamespace
+    from app.voice import AudioFile, Transcript, UncertainTranscript
+    from app.ai import Interpretation
+    from app.domain import InvoiceCommand
+    from app.intent import InvoiceIntent
+    client, fixture, sent, _ = flow
+    if not duplicate:
+        fixture.records["Catalog_Companies"] = fixture.records["Catalog_Companies"][:1]
+    bot = client.app.state.bot
+    text = "Сформируй счёт для ООО Синтетика за сентябрь 2026"
+    transcript = Transcript.model_validate({"text": text, "logprobs": [{"token": "x", "logprob": -4.0}]})
+    async def transcribe(audio):
+        raise UncertainTranscript(transcript, "uncertain")
+    async def download(voice):
+        return AudioFile(content=b"OggS" + b"OpusHead" + b"x" * 32)
+    async def interpret(value, draft):
+        assert value == text
+        return Interpretation(command=InvoiceCommand(client="ООО Синтетика", year=2026, month=9), needs_confirmation=True)
+    bot.speech = SimpleNamespace(transcribe=transcribe)
+    monkeypatch.setattr(bot.telegram, "download_voice", download)
+    monkeypatch.setattr(bot.interpreter, "interpret", interpret)
+    update = {"update_id": 1, "message": {"message_id": 1, "from": {"id": 123, "is_bot": False},
+        "chat": {"id": 123, "type": "private"}, "voice": {"file_id": "v", "file_unique_id": "u",
+            "duration": 5, "mime_type": "audio/ogg"}}}
+    assert client.post('/telegram/webhook', json=update).status_code == 200
+    assert 123 in bot.client_choices and 123 not in bot.pending
+    assert text in sent[-1]['text'] and text not in caplog.text
+    assert not any(r.url.path.endswith('Document_InventoryExpense') for r in fixture.calls)
+    old_button = button(flow)
+    assert press(flow, old_button).status_code == 200
+    assert 123 in bot.pending
+    assert {r.method for r in fixture.calls} == {'GET'}
+
+
+def test_readonly_retry_retains_failed_command_without_reinterpreting(flow, monkeypatch, caplog):
+    from app.domain import BackendFailure
+    client, fixture, sent, _ = flow
+    fixture.records['Catalog_Companies'] = fixture.records['Catalog_Companies'][:1]
+    bot = client.app.state.bot
+    original = bot.service.onec.resolve_client
+    async def unavailable(*args, **kwargs):
+        raise BackendFailure('firstbit_get_failed_timeout')
+    monkeypatch.setattr(bot.service.onec, 'resolve_client', unavailable)
+    assert send(flow).status_code == 200
+    assert '/retry' in sent[-1]['text']
+    assert 'firstbit_get_failed_timeout' in caplog.text
+    monkeypatch.setattr(bot.service.onec, 'resolve_client', original)
+    async def no_ai(*args, **kwargs):
+        pytest.fail('Retry must not interpret or transcribe again')
+    monkeypatch.setattr(bot.interpreter, 'interpret', no_ai)
+    assert send(flow, '/retry', 2).status_code == 200
+    assert 123 in bot.pending
+    assert {r.method for r in fixture.calls} == {'GET'}
+    assert send(flow, '/cancel', 3).status_code == 200
+    assert send(flow, '/retry', 4).status_code == 200
+    assert not bot.pending
+
+
+def test_uncertain_readonly_edit_cannot_change_existing_preview(flow, monkeypatch):
+    from types import SimpleNamespace
+    from app.voice import AudioFile, Transcript, UncertainTranscript
+    from app.ai import Interpretation
+    from app.intent import InvoiceIntent
+    client, fixture, sent, _ = flow
+    fixture.records['Catalog_Companies'] = fixture.records['Catalog_Companies'][:1]
+    assert send(flow).status_code == 200
+    bot = client.app.state.bot
+    before = bot.pending[123].prepared
+    transcript = Transcript.model_validate({'text': 'Цена 9999', 'logprobs': [{'token': 'x', 'logprob': -4.0}]})
+    async def transcribe(audio):
+        raise UncertainTranscript(transcript, 'Уточните цену текстом')
+    async def download(voice):
+        return AudioFile(content=b'OggS' + b'OpusHead' + b'x' * 32)
+    async def interpret(value, draft):
+        return Interpretation(intent=InvoiceIntent(action='edit', client=None, invoice_date=None, service_period=None, services=(),
+            lines_mode='keep', tax=None, previous=None, clarification=None), needs_confirmation=True)
+    bot.speech = SimpleNamespace(transcribe=transcribe)
+    monkeypatch.setattr(bot.telegram, 'download_voice', download)
+    monkeypatch.setattr(bot.interpreter, 'interpret', interpret)
+    gets = len(fixture.calls)
+    update = {'update_id': 2, 'message': {'message_id': 2, 'from': {'id': 123, 'is_bot': False},
+        'chat': {'id': 123, 'type': 'private'}, 'voice': {'file_id': 'v', 'file_unique_id': 'u', 'duration': 5}}}
+    assert client.post('/telegram/webhook', json=update).status_code == 200
+    assert 123 not in bot.pending and 123 not in bot.client_choices
+    assert bot.contexts[123].prepared == before
+    assert len(fixture.calls) == gets
+    assert 'reply_markup' not in sent[-1]
+
+
+def test_name_only_discovery_before_date_without_ai_then_fresh_choice(flow, monkeypatch):
+    bot = flow[0].app.state.bot
+    async def no_ai(*args, **kwargs):
+        pytest.fail('Directory search does not require an invoice-language call')
+    monkeypatch.setattr(bot.interpreter, 'interpret', no_ai)
+    assert send(flow, 'Найди компанию ООО Синтетика').status_code == 200
+    assert 123 in bot.client_choices and 123 not in bot.pending
+    assert bot.client_choices[123].command is None
+    assert not any(r.url.path.endswith('Document_InventoryExpense') for r in flow[1].calls)
+    assert press(flow, button(flow), 2).status_code == 200
+    assert 'Компания выбрана' in flow[2][-1]['text']
+    assert bot.contexts[123].selected_client_id == ref(1)
+    assert not bot.pending
+
+
+def test_numeric_company_selection_and_name_refinement_keep_invoice_scope(flow, monkeypatch):
+    send(flow)
+    old_button = button(flow)
+    bot = flow[0].app.state.bot
+    original = bot.client_choices[123].command
+    async def no_ai(*args, **kwargs):
+        pytest.fail('Refinement/choice must not replay AI')
+    monkeypatch.setattr(bot.interpreter, 'interpret', no_ai)
+    assert send(flow, 'ООО Синтетик', 2).status_code == 200
+    assert bot.client_choices[123].command.year == original.year
+    assert bot.client_choices[123].command.month == original.month
+    assert press(flow, old_button, 3).status_code == 200
+    assert not bot.pending
+    assert send(flow, '1', 4).status_code == 200
+    assert bot.pending[123].prepared.preview.service_period.month == 9
+    assert {r.method for r in flow[1].calls} == {'GET'}
+
+
+def test_discovery_rechecks_selected_identity_and_cancel_clears_scope(flow):
+    send(flow, 'ООО Синтетика')
+    data = button(flow)
+    flow[1].records['Catalog_Companies'][0]['Inactive'] = True
+    assert press(flow, data, 2).status_code == 200
+    assert 123 not in flow[0].app.state.bot.contexts
+    assert not flow[0].app.state.bot.pending
+    send(flow, 'ООО Синтетика', 3)
+    assert send(flow, '/cancel', 4).status_code == 200
+    assert not flow[0].app.state.bot.client_choices and not flow[0].app.state.bot.contexts
+
+
+def test_expired_numeric_choice_never_reads_or_selects(flow, monkeypatch):
+    from types import SimpleNamespace
+    send(flow)
+    before = len(flow[1].calls)
+    monkeypatch.setattr('app.bot.time', SimpleNamespace(monotonic=lambda: float('inf')))
+    assert send(flow, '1', 2).status_code == 200
+    assert not flow[0].app.state.bot.pending and len(flow[1].calls) == before
+
+
+def test_uncertain_bare_voice_discovers_company_then_period_retains_selection(flow, monkeypatch):
+    from types import SimpleNamespace
+    from app.voice import Transcript, UncertainTranscript, AudioFile
+    from app.ai import Interpretation
+    from app.intent import InvoiceIntent, PeriodInput
+    bot = flow[0].app.state.bot
+    async def transcribe(audio):
+        raise UncertainTranscript(Transcript.model_validate({'text': 'ООО Синтетика',
+            'logprobs': [{'token': 'x', 'logprob': -4.0}]}), 'uncertain')
+    async def download(voice):
+        return AudioFile(content=b'OggS' + b'OpusHead' + b'x' * 32)
+    bot.speech = SimpleNamespace(transcribe=transcribe)
+    monkeypatch.setattr(bot.telegram, 'download_voice', download)
+    async def interpret(text, draft):
+        assert text == 'за декабрь 2026' and draft.client == 'ООО Синтетика'
+        return Interpretation(intent=InvoiceIntent(action='edit', client=None, invoice_date=None,
+            service_period=PeriodInput(evidence=text, year=2026, month=12), services=(), lines_mode='keep',
+            tax=None, previous=None, clarification=None), needs_confirmation=True)
+    monkeypatch.setattr(bot.interpreter, 'interpret', interpret)
+    assert flow[0].post('/telegram/webhook', json={'update_id': 1, 'message': {'message_id': 1,
+        'from': {'id': 123, 'is_bot': False}, 'chat': {'id': 123, 'type': 'private'},
+        'voice': {'file_id': 'v', 'file_unique_id': 'u', 'duration': 5}}}).status_code == 200
+    assert 123 in bot.client_choices and not bot.pending
+    assert send(flow, '1', 2).status_code == 200
+    assert not bot.pending and bot.contexts[123].selected_client_id == ref(1)
+    assert send(flow, 'за декабрь 2026', 3).status_code == 200
+    assert bot.pending[123].prepared.request.client_id == ref(1)
+    assert bot.pending[123].prepared.preview.service_period.month == 12

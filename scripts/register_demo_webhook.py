@@ -40,23 +40,24 @@ class WebhookSetResponse(SuccessResponse):
     result: Literal[True]
 
 
-async def main():
-    load_local_env()
-    disable_wire_logs()
-    settings = Settings.from_env()
-    if settings.mode != "firstbit_readonly" or settings.onec_write_enabled:
-        raise ValueError("Read-only mode required")
-    state_path = ROOT / ".local/runtime/demo-processes.json"
-    state = validate_json(DemoState, state_path.read_text(encoding="utf-8-sig"))
-    public = state.public_url
+def validate_public_url(public: str) -> str:
     parsed = urlsplit(public)
     if (parsed.scheme != "https" or not parsed.hostname
-            or not re.fullmatch(r"[a-z0-9-]+\.trycloudflare\.com", parsed.hostname)
+            or not re.fullmatch(r"(?!api\.|www\.)[a-z0-9-]+\.(?:trycloudflare\.com|ngrok-free\.app|ngrok-free\.dev|ngrok\.app|ngrok\.io)", parsed.hostname)
             or parsed.username or parsed.password or parsed.path not in ("", "/")
             or parsed.port or parsed.query or parsed.fragment):
         raise ValueError("Expected the demo's HTTPS tunnel root")
+    return public.rstrip('/')
+
+
+async def register_webhook(public: str, settings: Settings):
+    disable_wire_logs()
+    if settings.mode != "firstbit_readonly" or settings.onec_write_enabled:
+        raise ValueError("Read-only mode required")
+    public = validate_public_url(public)
     async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
-        health = validate_json(Health, await bounded_request(client, "GET", public + "/healthz"))
+        health = validate_json(Health, await bounded_request(client, "GET", public + "/healthz",
+            headers={"ngrok-skip-browser-warning": "1"}))
         if health.mode != "firstbit_readonly":
             raise ValueError("Unexpected public app health")
         base = "https://api.telegram.org/bot" + settings.token.get_secret_value() + "/"
@@ -72,6 +73,12 @@ async def main():
             raise ValueError("Webhook registration did not persist")
         print(json.dumps({"webhook": "READY", "app_mode": settings.mode,
                           "pending_updates_dropped": False, "writes_enabled": False}))
+
+
+async def main():
+    load_local_env()
+    state = validate_json(DemoState, (ROOT / '.local/runtime/demo-processes.json').read_text(encoding='utf-8-sig'))
+    await register_webhook(state.public_url, Settings.from_env())
 
 
 if __name__ == "__main__":

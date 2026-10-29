@@ -58,12 +58,14 @@ class FakeOneC:
         client = matches[0]
         return ResolvedClient(client_id=client.client_id, display_name=client.display_name)
 
-    async def resolve_service(self, client_id: str, query: str) -> ResolvedService:
+    async def resolve_service(self, client_id: str, query: str, *, selected_id: str | None = None) -> ResolvedService:
         if client_id not in self.clients:
             raise UserProblem("Клиент больше недоступен.")
         name = " ".join(query.casefold().split())
         matches = [item for item in self.services.values()
                    if name in item.search_names or name == item.description.casefold()]
+        if selected_id is not None:
+            matches = [item for item in matches if item.service_id == selected_id]
         if len(matches) != 1:
             if matches:
                 raise UserProblem("Уточните услугу: " + "; ".join(item.description for item in matches) + ".")

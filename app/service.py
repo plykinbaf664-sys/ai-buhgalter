@@ -1,11 +1,13 @@
 import asyncio
 import logging
+import re
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import date, datetime, timezone
 
-from app.domain import (BillingBasis, Invoice, InvoiceCommand, InvoiceConflict, InvoiceResult, OneC,
+from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCandidates, ClientChoiceRequired, Invoice, InvoiceCommand, InvoiceConflict, InvoiceResult, OneC,
                         OperationState, PdfDocument, PreparedInvoice, ResolvedClient,
                         ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection, ResolvedPreviewLineOverride,
-                        ServiceProblem, StaleBasis, StrictModel, UserProblem,
+                        ServiceProblem, ServiceChoiceRequired, InitialQuantityRequired, StaleBasis, StrictModel, UserProblem,
                         WorkflowFailure, WritesDisabled)
 
 logger = logging.getLogger("invoices")
@@ -33,6 +35,15 @@ def event(*, request_id: str, user_id: int, stage: str, status: str,
                           error=error).model_dump_json())
 
 
+def safe_backend_error(exc: Exception) -> str:
+    # Only exact adapter-owned codes. Never log arbitrary exception strings.
+    if isinstance(exc, BackendFailure) and len(exc.args) == 1 and isinstance(exc.args[0], str):
+        code = exc.args[0]
+        if re.fullmatch(r"firstbit_(?:schema_mismatch|get_failed(?:_(?:timeout|http_error|http_[1-5][0-9]{2}|response_too_large|invalid_response))?)", code):
+            return code
+    return type(exc).__name__
+
+
 class InvoiceService:
     def __init__(self, onec: OneC, timeout: float = 5, *, allow_real_writes: bool = False):
         if type(allow_real_writes) is not bool:
@@ -49,10 +60,13 @@ class InvoiceService:
     async def prepare(self, command: InvoiceCommand, request_id: str, user_id: int, *,
                       existing: PreparedInvoice | None = None,
                       old_command: InvoiceCommand | None = None,
-                      selected_client_id: str | None = None) -> PreparedInvoice:
+                      selected_client_id: str | None = None, require_client_choice: bool = False,
+                      selected_service_ids: dict[int, str] | None = None) -> PreparedInvoice:
         resolution_step = "client"
         try:
             command = InvoiceCommand.model_validate(command)
+            if command.initial_overrides and getattr(self.onec, "preview_only", False) is not True:
+                raise UserProblem("Первоначальные денежные параметры доступны только в read-only preview.")
             client = (ResolvedClient.model_validate(await asyncio.wait_for(
                           self.onec.resolve_client(command.client, selected_id=selected_client_id), self.timeout))
                       if selected_client_id is not None else
@@ -60,6 +74,9 @@ class InvoiceService:
                       if existing is not None and old_command is not None and command.client == old_command.client
                       else ResolvedClient.model_validate(await asyncio.wait_for(
                           self.onec.resolve_client(command.client), self.timeout)))
+            if require_client_choice and selected_client_id is None:
+                raise ClientChoiceRequired(ClientCandidates(candidates=(ClientCandidate(
+                    client_id=client.client_id, display_name=client.display_name, full_name=client.display_name),)))
             if selected_client_id is not None and client.client_id != selected_client_id:
                 raise ValueError("Provider changed the explicitly selected client")
             selections = []
@@ -72,8 +89,15 @@ class InvoiceService:
                             cached = resolved_old.service_id
                             break
                 try:
-                    service_id = cached or ResolvedService.model_validate(await asyncio.wait_for(
-                        self.onec.resolve_service(client.client_id, selected.query), self.timeout)).service_id
+                    chosen = (selected_service_ids or {}).get(number)
+                    service_id = (ResolvedService.model_validate(await asyncio.wait_for(
+                        self.onec.resolve_service(client.client_id, selected.query, selected_id=chosen), self.timeout)).service_id
+                        if chosen is not None else cached or ResolvedService.model_validate(await asyncio.wait_for(
+                        self.onec.resolve_service(client.client_id, selected.query), self.timeout)).service_id)
+                    if chosen is not None and chosen != service_id:
+                        raise ValueError("Provider changed the selected service")
+                except ServiceChoiceRequired as exc:
+                    raise ServiceChoiceRequired(exc.choices, number) from None
                 except UserProblem as exc:
                     raise ServiceProblem(str(exc), number) from None
                 selections.append(ResolvedServiceSelection(service_id=service_id, quantity=selected.quantity))
@@ -90,7 +114,8 @@ class InvoiceService:
                     if edit.line_number > len(existing.preview.lines):
                         raise UserProblem("В preview нет такой строки.")
                     overrides.append(ResolvedPreviewLineOverride(**edit.model_dump(),
-                        source_line_number=existing.preview.lines[edit.line_number - 1].source_line_number))
+                        source_line_number=existing.preview.lines[edit.line_number - 1].source_line_number,
+                        source_id=existing.preview.lines[edit.line_number - 1].source_id or source_id))
             resolved = ResolvedInvoiceCommand(
                 client_id=client.client_id, year=period.year if period else None, month=period.month if period else None,
                 invoice_date=command.invoice_date or date.today(), service_period=period,
@@ -102,11 +127,41 @@ class InvoiceService:
                 self.onec.resolve_basis(resolved), self.timeout))
             if basis.preview is None:
                 raise ValueError("Provider did not return a preview")
+            if command.initial_overrides:
+                source = basis.preview.historical_proposal
+                if source is None:
+                    raise UserProblem("Для первоначальных сумм нужен проверенный исторический образец.")
+                initial = []
+                aligned = len(selections) == len(basis.preview.lines) and all(
+                    selected.service_id == line.service_id for selected, line in zip(selections, basis.preview.lines))
+                for edit in command.initial_overrides:
+                    selected = selections[edit.line_number - 1]
+                    indexes = [edit.line_number - 1] if aligned else [i for i, line in enumerate(basis.preview.lines)
+                        if line.service_id == selected.service_id]
+                    if not indexes or len(indexes) > 1 and (edit.price is not None or edit.amount is not None or edit.description is not None):
+                        raise UserProblem("Для услуги несколько исторических строк. Уточните строку суммы; объединять их нельзя.")
+                    for index in indexes:
+                        line = basis.preview.lines[index]
+                        if edit.amount is not None:
+                            unit = (edit.amount / line.quantity).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
+                            if (unit * line.quantity).quantize(Decimal('.01'), rounding=ROUND_HALF_UP) != edit.amount:
+                                raise InitialQuantityRequired(edit.line_number, edit.amount, line.quantity, line.uom)
+                        initial.append(ResolvedPreviewLineOverride(**{**edit.model_dump(), "line_number": index + 1},
+                            source_line_number=line.source_line_number, source_id=line.source_id or source.source_id))
+                resolved = ResolvedInvoiceCommand(**{**resolved.model_dump(), "preview_overrides": tuple(initial),
+                    "preview_source_id": source.source_id})
+                basis = BillingBasis.model_validate(await asyncio.wait_for(self.onec.resolve_basis(resolved), self.timeout))
+                if basis.preview is None or basis.preview.user_overrides != tuple(edit.user_edit() for edit in initial):
+                    raise ValueError("Provider ignored initial user parameters")
             if period is not None and basis.preview.service_period != period:
                 raise ValueError("Provider changed requested service period")
-            expanded_history = (basis.preview.historical_proposal is not None and len(selections) == 1
-                and selections[0].quantity is None
-                and all(line.service_id == selections[0].service_id for line in basis.preview.lines))
+            requested_ids = [selection.service_id for selection in selections]
+            returned_ids = [line.service_id for line in basis.preview.lines]
+            compact = lambda ids: [key for index, key in enumerate(ids) if index == 0 or ids[index - 1] != key]
+            expanded_history = (basis.preview.historical_proposal is not None and bool(selections)
+                and all(selection.quantity is None for selection in selections)
+                and compact(requested_ids) == compact(returned_ids)
+                and all(returned_ids.count(key) >= requested_ids.count(key) for key in requested_ids))
             if selections and not expanded_history and [(s.service_id, s.quantity) for s in selections] != [
                     (line.service_id, s.quantity) for s, line in zip(selections, basis.preview.lines)]:
                 raise ValueError("Provider changed selected services")
@@ -136,7 +191,7 @@ class InvoiceService:
             event(request_id=request_id, user_id=user_id, stage="resolve", status="clarification", error=resolution_step)
             raise
         except Exception as exc:
-            event(request_id=request_id, user_id=user_id, stage="resolve", status="error", error=type(exc).__name__)
+            event(request_id=request_id, user_id=user_id, stage="resolve", status="error", error=safe_backend_error(exc))
             raise WorkflowFailure("resolve", None) from None
 
     async def refresh(self, prepared: PreparedInvoice, request_id: str, user_id: int) -> PreparedInvoice:
@@ -171,7 +226,7 @@ class InvoiceService:
         except (UserProblem, WorkflowFailure):
             raise
         except Exception as exc:
-            event(request_id=request_id, user_id=user_id, stage="refresh", status="error", error=type(exc).__name__)
+            event(request_id=request_id, user_id=user_id, stage="refresh", status="error", error=safe_backend_error(exc))
             raise WorkflowFailure("resolve" if stage == "refresh" else "reconcile", None,
                                   prepared.operation_id, known_state) from None
 
@@ -252,6 +307,6 @@ class InvoiceService:
                     event(request_id=request_id, user_id=user_id, stage="reconcile", status="unknown",
                           operation_id=operation_id, document_id=document_id, error=type(recovery_error).__name__)
             event(request_id=request_id, user_id=user_id, stage=stage, status=known_state,
-                  operation_id=operation_id, document_id=document_id, error=type(exc).__name__)
+                  operation_id=operation_id, document_id=document_id, error=safe_backend_error(exc))
             raise WorkflowFailure("stale" if isinstance(exc, StaleBasis) else stage,
                                   document_id, operation_id, known_state) from None

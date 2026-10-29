@@ -65,6 +65,43 @@ def _voice_tokens(value: str) -> tuple[str, ...]:
     return tuple(w for w in joined if w not in _LEGAL)
 
 
+def _sound_key(value: str) -> str:
+    # Approximate retrieval only: Cyrillic к may represent Latin c, and final e may be silent.
+    value = value.replace("ph", "f").replace("ck", "k").replace("qu", "kv")
+    value = re.sub(r"c(?=[eiy])", "s", value).replace("c", "k").replace("q", "k")
+    value = re.sub(r"([a-z])\1+", r"\1", value)
+    return value[:-1] if len(value) > 4 and value.endswith("e") else value
+
+
+def _word_similarity(left: str, right: str) -> float:
+    if left == right:
+        return 1.0
+    # One insertion/deletion/substitution or adjacent transposition, before
+    # phonetic folding removes letters. Retrieval only; never selects identity.
+    if min(len(left), len(right)) >= 3 and _one_typo(left, right):
+        return .9 if min(len(left), len(right)) >= 4 else .85
+    left, right = _sound_key(left), _sound_key(right)
+    if min(len(left), len(right)) < 4:
+        if len(left) == len(right) == 3 and sum(a != b for a, b in zip(left, right)) <= 1:
+            return .85
+        return 0
+    return SequenceMatcher(None, left, right, autojunk=False).ratio()
+
+
+def _one_typo(left: str, right: str) -> bool:
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        different = [i for i, (a, b) in enumerate(zip(left, right)) if a != b]
+        return len(different) <= 1 or (len(different) == 2
+            and different[1] == different[0] + 1
+            and left[different[0]] == right[different[1]]
+            and left[different[1]] == right[different[0]])
+    shorter, longer = sorted((left, right), key=len)
+    first = next((i for i, (a, b) in enumerate(zip(shorter, longer)) if a != b), len(shorter))
+    return shorter[first:] == longer[first + 1:]
+
+
 def similarity(query: str, name: str) -> float:
     """Conservative ranking for explicit user selection; never an auto-match rule."""
     query_words, name_words = _voice_tokens(query), _voice_tokens(name)
@@ -76,8 +113,28 @@ def similarity(query: str, name: str) -> float:
     if q in n:
         return .94
     if len(q) < 5:
+        # One misheard letter in a short spoken acronym still yields choices.
+        # Two-letter queries stay blocked; this never changes exact identity.
+        if len(query_words) == 1 and len(q) >= 3 and any(
+                len(word) == len(q) and sum(a != b for a, b in zip(q, word)) == 1
+                for word in name_words):
+            return .82
         return 0
+    if len(_sound_key(q)) >= 4 and _sound_key(q) in _sound_key(n):
+        return .93
     # Word order and minor transcription/spelling variations only affect suggestions.
     ratio = max(SequenceMatcher(None, q, n, autojunk=False).ratio(),
         SequenceMatcher(None, " ".join(sorted(query_words)), " ".join(sorted(name_words)), autojunk=False).ratio())
+    # A short spoken brand can match one word inside a much longer legal company name.
+    # Require every query word to have its own strong token match; never auto-select it.
+    available = list(name_words)
+    scores = []
+    for word in query_words:
+        best = max(((_word_similarity(word, other), i) for i, other in enumerate(available)), default=(0, -1))
+        if best[0] < .8:
+            break
+        scores.append(best[0])
+        available.pop(best[1])
+    if len(scores) == len(query_words):
+        ratio = max(ratio, min(scores) * .98)
     return ratio if ratio >= .78 else 0

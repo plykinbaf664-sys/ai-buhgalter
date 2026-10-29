@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import httpx
@@ -21,6 +22,19 @@ class Telegram:
         self._files = f"https://api.telegram.org/file/bot{token}/"
         self._client = client
         disable_wire_logs()
+
+    async def _read_voice_resource(self, method: str, url: str, **kwargs) -> bytes:
+        # Only idempotent file lookup/download. Never retry sendMessage/sendDocument.
+        if not (method == "POST" and url == self._base + "/getFile" or
+                method == "GET" and url.startswith(self._files)):
+            raise ValueError("Only Telegram voice reads may be repeated")
+        for attempt in range(2):
+            try:
+                return await bounded_request(self._client, method, url, **kwargs)
+            except ExternalFailure as exc:
+                if attempt or exc.code not in ("timeout", "http_error"):
+                    raise
+                await asyncio.sleep(.2)
 
     async def _send(self, method: str, chat_id: int, **kwargs) -> None:
         try:
@@ -63,8 +77,8 @@ class Telegram:
             raise UserProblem("Голосовой файл слишком большой. Максимум 4 МБ.")
         if voice.mime_type not in (None, "audio/ogg", "audio/opus"):
             raise UserProblem("Поддерживаются голосовые сообщения Telegram в формате OGG/Opus.")
-        response = await bounded_request(self._client, "POST", self._base + "/getFile",
-                                         json=FileRequest(file_id=voice.file_id).model_dump())
+        response = await self._read_voice_resource("POST", self._base + "/getFile",
+            json=FileRequest(file_id=voice.file_id).model_dump(), timeout=httpx.Timeout(4, connect=3), deadline=5)
         try:
             file = validate_json(FileResponse, response).result
             if file.file_id != voice.file_id or file.file_unique_id != voice.file_unique_id:
@@ -74,8 +88,8 @@ class Telegram:
                 raise ValueError("Unsafe file path")
             if file.file_size is not None and file.file_size > MAX_VOICE_BYTES:
                 raise UserProblem("Голосовой файл слишком большой. Максимум 4 МБ.")
-            content = await bounded_request(self._client, "GET", self._files + file.file_path,
-                                             limit=MAX_VOICE_BYTES, deadline=20)
+            content = await self._read_voice_resource("GET", self._files + file.file_path,
+                limit=MAX_VOICE_BYTES, timeout=httpx.Timeout(8, connect=3), deadline=12)
             if file.file_size is not None and len(content) != file.file_size:
                 raise ValueError("File size mismatch")
             return AudioFile(content=content)

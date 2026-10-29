@@ -37,6 +37,8 @@ def voice_harness():
     def telegram(request):
         calls.append(request)
         if request.url.path.endswith("getFile"):
+            if controls.pop("lookup_flap", False):
+                raise httpx.ReadTimeout("PRIVATE_NETWORK_ERROR")
             result = {
                 "file_id": "file1", "file_unique_id": "unique1", "file_size": len(controls["audio"]),
                 "file_path": controls["file_path"],
@@ -45,6 +47,8 @@ def voice_harness():
                 result.pop("file_size")
             return httpx.Response(200, json={"ok": True, "result": result})
         if "/file/bot" in request.url.path:
+            if controls.pop("download_flap", False):
+                raise httpx.ReadTimeout("PRIVATE_NETWORK_ERROR")
             if controls.get("download_status"):
                 return httpx.Response(controls["download_status"])
             return httpx.Response(200, content=controls["audio"])
@@ -87,6 +91,31 @@ def voice_update(**overrides):
             "file_id": "file1", "file_unique_id": "unique1", "duration": 10,
             "mime_type": "audio/ogg", "file_size": len(AUDIO), **overrides,
         }}}
+
+
+@pytest.mark.parametrize('phase', ['lookup_flap', 'download_flap'])
+def test_transient_voice_retrieval_recovers_without_telegram_redelivery_or_extra_stt(voice_harness, phase, caplog):
+    client, backend, controls, calls, sent, _ = voice_harness
+    controls[phase] = True
+    assert client.post('/telegram/webhook', json=voice_update()).status_code == 200
+    assert 123 in client.app.state.bot.pending
+    assert sum(r.url.path.endswith('transcriptions') for r in calls) == 1
+    assert not backend.documents
+    assert 'PRIVATE_NETWORK_ERROR' not in caplog.text
+
+
+def test_voice_parser_outage_shows_recognized_text_privately_without_repeating_stt(voice_harness, monkeypatch, caplog):
+    client, backend, controls, calls, sent, settings = voice_harness
+    async def unavailable(*args, **kwargs):
+        raise ExternalFailure("openai_timeout")
+    monkeypatch.setattr(client.app.state.bot.interpreter, "interpret", unavailable)
+    assert client.post('/telegram/webhook', json=voice_update()).status_code == 200
+    reply = json.loads(sent[-1].content)['text']
+    assert controls['text'] in reply and 'не записывая голос заново' in reply
+    assert controls['text'] not in caplog.text
+    assert not backend.documents and not client.app.state.bot.pending
+    assert client.post('/telegram/webhook', json=voice_update()).status_code == 200
+    assert sum(r.url.path.endswith('transcriptions') for r in calls) == 1
 
 
 def confirm(client, data):
@@ -233,10 +262,12 @@ def test_sdk_voice_returns_pydantic_transcript_and_deletes_temp_file():
 
 
 def test_sdk_voice_transcript_flows_to_typed_command():
+    from app.ai import Extraction
     voice_sdk = FakeSdk(sdk_transcript("Выстави, пожалуйста, счёт ООО Ромашка за сентябрь 2026"))
 
     async def parse(**kwargs):
-        return SimpleNamespace(output_parsed=InvoiceCommand(client="ООО Ромашка", year=2026, month=9))
+        assert kwargs["text_format"] is Extraction
+        return SimpleNamespace(output_parsed=Extraction(action="create_invoice", client="ООО Ромашка", year=2026, month=9))
 
     command_sdk = SimpleNamespace(responses=SimpleNamespace(parse=parse))
 

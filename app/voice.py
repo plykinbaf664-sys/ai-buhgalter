@@ -50,6 +50,13 @@ class TranscriptionRequest(StrictModel):
     include: list[Literal["logprobs"]] = Field(default_factory=lambda: ["logprobs"], serialization_alias="include[]")
 
 
+class UncertainTranscript(UserProblem):
+    """Untrusted speech text: only a readonly, explicit-choice flow may use it."""
+    def __init__(self, transcript: Transcript, message: str):
+        self.transcript = Transcript.model_validate(transcript)
+        super().__init__(message)
+
+
 class SpeechToText:
     def __init__(self, client: httpx.AsyncClient | None, api_key: SecretStr, model: str,
                  sdk_client: object | None = None,
@@ -104,7 +111,7 @@ class SpeechToText:
         scores = [entry.logprob for entry in transcript.logprobs]
         # A conservative heuristic, not a calibrated confidence guarantee.
         if sum(scores) / len(scores) < -1.0 or min(scores) < -3.0:
-            raise UserProblem("Голос распознан неуверенно. Я услышал:\n«" + " ".join(transcript.text.split())
+            raise UncertainTranscript(transcript, "Голос распознан неуверенно. Я услышал:\n«" + " ".join(transcript.text.split())
                               + "»\nИсправьте название или дату и пришлите запрос текстом, либо запишите голосовое ещё раз.")
 
     async def transcribe(self, audio: AudioFile) -> Transcript:

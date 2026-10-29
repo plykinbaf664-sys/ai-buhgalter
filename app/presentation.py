@@ -58,11 +58,15 @@ def historical_preview_text(preview: InvoicePreview) -> str:
         parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
     parts.extend((f"Договор: {source.contract_name}",
                   f"Образец: счёт №{source.source_number} от {source.source_date:%d.%m.%Y}"))
+    source_map = {item.source_id: item for item in source.sources}
     for i, line in enumerate(preview.lines, 1):
         parts.extend(("", f"{i}. {line.description}",
             f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}",
             f"Без НДС: {money(line.subtotal)}; НДС {quantity(line.tax.rate)}% ({line.tax.label}): {money(line.tax_amount)}",
             f"Сумма строки: {money(line.total)} {preview.currency}"))
+        if len(source_map) > 1 and line.source_id in source_map:
+            origin = source_map[line.source_id]
+            parts.append(f"Образец строки: №{origin.source_number} от {origin.source_date:%d.%m.%Y}")
     parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
                   f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
                   f"Итого: {money(preview.total)} {preview.currency}", "",
@@ -81,7 +85,7 @@ def historical_preview_text(preview: InvoicePreview) -> str:
 def manual_changes_text(preview: InvoicePreview) -> str:
     changes = []
     for edit in preview.user_overrides:
-        fields = [label for field, label in (("price", "цена без НДС"), ("tax", "налог"), ("description", "название"))
+        fields = [label for field, label in (("price", "цена без НДС"), ("amount", "сумма без НДС"), ("tax", "налог"), ("description", "название"))
                   if getattr(edit, field) is not None]
         changes.append(f"строка {edit.line_number}: {', '.join(fields)}")
     return "Изменено пользователем — " + "; ".join(changes) + ". Только preview; это не изменение данных 1С."

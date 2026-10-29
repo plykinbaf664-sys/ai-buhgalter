@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import tempfile
+from typing import Literal
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -31,6 +32,7 @@ class State(ExternalModel):
     app_pid: int = Field(gt=0)
     tunnel_pid: int | None = Field(default=None, gt=0)
     public_url: str | None = None
+    tunnel_provider: Literal['cloudflare', 'ngrok'] = 'cloudflare'
 
 
 class Process(ExternalModel):
@@ -60,20 +62,22 @@ def process_query(filter: str) -> tuple[Process, ...]:
     return tuple(Process.model_validate(row) for row in json.loads(raw or "[]"))
 
 
-def stop_owned(state: State):
+def stop_owned(state: State, *, roles=('app', 'tunnel')):
     if Path(state.workspace).resolve() != ROOT:
         raise ValueError("Unexpected demo workspace")
     for role, pid in (("app", state.app_pid), ("tunnel", state.tunnel_pid)):
-        if pid is None:
+        if pid is None or role not in roles:
             continue
         rows = process_query(f"ProcessId={pid}")
         if not rows:
             continue
         process = rows[0]
         cmd = (process.CommandLine or "").casefold()
+        tunnel_binary = ROOT / '.local/tools/ngrok.exe' if state.tunnel_provider == 'ngrok' else TUNNEL
+        tunnel_name = 'ngrok.exe' if state.tunnel_provider == 'ngrok' else 'cloudflared.exe'
         owned = (str(ROOT).casefold() in cmd and
                  (role == "app" and process.Name == "python.exe" and str(PYTHON).casefold() in cmd and "run_local.py" in cmd or
-                  role == "tunnel" and process.Name == "cloudflared.exe" and str(TUNNEL).casefold().replace('/', '\\') in cmd))
+                  role == "tunnel" and process.Name == tunnel_name and str(tunnel_binary).casefold().replace('/', '\\') in cmd))
         if not owned:
             raise ValueError("Refusing to stop an unrelated process")
         if role == "app":
@@ -87,7 +91,7 @@ def launch(role: str) -> int:
     if role == "app":
         code = "$file=Join-Path $env:DEMO_WORKSPACE '.venv\\Scripts\\python.exe'; $argsList=@('-u','scripts/run_local.py'); "
     else:
-        code = "$file=Join-Path $env:DEMO_WORKSPACE '.local\\tools\\cloudflared.exe'; $argsList=@('tunnel','--url','http://127.0.0.1:8000','--no-autoupdate'); "
+        code = "$file=Join-Path $env:DEMO_WORKSPACE '.local\\tools\\cloudflared.exe'; $argsList=@('tunnel','--protocol','http2','--url','http://127.0.0.1:8000','--no-autoupdate'); "
     code += ("$logs=Join-Path $env:DEMO_WORKSPACE '.local\\runtime'; "
         f"$process=Start-Process -FilePath $file -ArgumentList $argsList -WorkingDirectory $env:DEMO_WORKSPACE -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs '{role}.stdout.log') -RedirectStandardError (Join-Path $logs '{role}.stderr.log') -PassThru; $process.Id")
     return int(shell(code))
@@ -113,6 +117,15 @@ def health() -> Health | None:
         return None
 
 
+def quick_tunnel_url(log: str) -> str | None:
+    # An API failure also contains https://api.trycloudflare.com, not a public tunnel.
+    marker = "Your quick Tunnel has been created"
+    if marker not in log:
+        return None
+    matches = re.findall(r"https://(?!api\.|www\.)[a-z0-9-]+\.trycloudflare\.com\b", log.split(marker, 1)[1])
+    return matches[-1] if matches else None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--restart", action="store_true", help="Restart only this workspace's recorded app/tunnel")
@@ -120,10 +133,14 @@ def main():
     if os.name != "nt":
         raise ValueError("This launcher is for Windows")
     subprocess.run([str(PYTHON), "scripts/run_local.py", "--check"], cwd=ROOT, check=True)
-    if not TUNNEL.is_file():
-        raise ValueError("Official cloudflared binary missing; see docs/firstbit/LIVE_DEMO.md")
     RUNTIME.mkdir(parents=True, exist_ok=True)
     state = validate_json(State, STATE.read_text(encoding="utf-8-sig")) if STATE.exists() else None
+    if state is not None and state.tunnel_provider == 'ngrok':
+        from scripts.start_ngrok_demo import start
+        start(restart=args.restart)
+        return
+    if not TUNNEL.is_file():
+        raise ValueError("Official cloudflared binary missing; see docs/firstbit/LIVE_DEMO.md")
     if state is not None and args.restart:
         stop_owned(state)
         time.sleep(.5)
@@ -149,10 +166,11 @@ def main():
     for _ in range(60):
         log_path = RUNTIME / "tunnel.stderr.log"
         log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
-        matches = re.findall(r"https://[a-z0-9-]+\.trycloudflare\.com", log)
-        if matches:
-            public = matches[-1]
+        public = quick_tunnel_url(log)
+        if public:
             break
+        if "failed to request quick Tunnel" in log:
+            raise RuntimeError("Cloudflare tunnel creation failed; check network/DNS")
         time.sleep(.5)
     if public is None:
         raise RuntimeError("Tunnel URL unavailable")

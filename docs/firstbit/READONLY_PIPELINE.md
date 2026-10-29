@@ -1,5 +1,7 @@
 # FirstBit read-only historical preview
 
+Расширение initial net amounts, всех активных услуг и нескольких исторических источников: [INITIAL_REQUESTS.md](INITIAL_REQUESTS.md). При работе с этим flow его правила дополняют исходный bookkeeping rollout ниже; write/post/PDF остаются выключенными.
+
 ## Status and navigation
 
 Implemented: `APP_MODE=firstbit_readonly`, `app/firstbit.py`, existing service/bot flow and deterministic application smoke. After owner supplied credentials and confirmed read-only account rights, **live FirstBit GET prepare/refresh passed**, producing a one-line historical preview. Live scope is one client and supported arithmetic; real Telegram/OpenAI were not contacted in this check. No create/post/PDF is enabled.
@@ -67,7 +69,7 @@ All business calls use fixed EntitySets, `$format=json`, explicit `$select`, int
 |---|---|
 | `Catalog_Companies` | `Ref_Key,DeletionMark,IsFolder,Inactive,Description,DescriptionFull,ContractByDefault_Key,TRN` |
 | `Catalog_CompanyContracts` | `Ref_Key,DeletionMark,Owner_Key,Inactive,Description,Entity_Key,AccountsCurrency_Key` |
-| `Catalog_Items` | `Ref_Key,DeletionMark,IsFolder,Inactive,Description,ItemType` (`Service`) |
+| `Catalog_Items` | `Ref_Key,DeletionMark,IsFolder,Inactive,Description,ItemType` (`Service`), `Code` |
 | `Catalog_Entities` | `Ref_Key,DeletionMark,Description,DescriptionFull` |
 | `Catalog_Currencies` | `Ref_Key,DeletionMark,Code,Description`; numeric ISO `784/840/978/826/643` maps to AED/USD/EUR/GBP/RUB |
 | `Catalog_VATRates` | `Ref_Key,DeletionMark,Description,Rate,Exempt,Export,OutOfScope,Calculated` |

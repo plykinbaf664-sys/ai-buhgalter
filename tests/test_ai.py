@@ -8,9 +8,10 @@ import httpx2
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncOpenAI
+from openai import APIStatusError
 from pydantic import SecretStr
 
-from app.ai import CommandInterpreter
+from app.ai import Extraction, CommandInterpreter
 from app.config import Settings
 from app.domain import InvoiceCommand, UserProblem
 from app.fake_onec import FakeOneC
@@ -103,9 +104,54 @@ class FakeSdk:
         self.responses = FakeSdkResponses(result, error)
 
 
-def test_sdk_returns_existing_pydantic_command_without_json_parsing():
+def test_sdk_parsing_recovers_timeout_with_same_input_and_bounded_attempts():
     command = InvoiceCommand(client="ООО Ромашка", year=2026, month=9)
-    sdk = FakeSdk(command)
+    calls = []
+    async def parse(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            raise TimeoutError("PRIVATE_TRANSIENT")
+        return SimpleNamespace(output_parsed=Extraction(action="create_invoice", client=command.client, year=command.year, month=command.month))
+    sdk = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    result = asyncio.run(CommandInterpreter(api_key=SecretStr("test"), model="gpt-5-mini", sdk_client=sdk).interpret(NATURAL))
+    assert result.command == command
+    assert len(calls) == 2 and calls[0] == calls[1]
+    assert calls[0]["timeout"] == 25 and calls[0]["store"] is False
+
+
+def test_sdk_does_not_retry_invalid_or_refused_parsed_values():
+    calls = []
+    async def parse(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(output_parsed=None)
+    sdk = SimpleNamespace(responses=SimpleNamespace(parse=parse))
+    with pytest.raises(ExternalFailure, match="invalid_llm_response"):
+        asyncio.run(CommandInterpreter(api_key=SecretStr("test"), model="gpt-5-mini", sdk_client=sdk).interpret(NATURAL))
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('status,expected_calls', [(401, 1), (429, 1), (503, 2)])
+def test_sdk_retries_only_transient_server_status_not_auth_or_quota(status, expected_calls):
+    calls = []
+    async def parse(**kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            response = httpx2.Response(status, request=httpx2.Request('POST', 'https://api.openai.com/v1/responses'))
+            raise APIStatusError('PRIVATE', response=response, body=None)
+        return SimpleNamespace(output_parsed=Extraction(action='create_invoice', client='ООО Ромашка', year=2026, month=9))
+    interpreter = CommandInterpreter(api_key=SecretStr('test'), model='gpt-5-mini',
+        sdk_client=SimpleNamespace(responses=SimpleNamespace(parse=parse)))
+    if status < 500:
+        with pytest.raises(ExternalFailure):
+            asyncio.run(interpreter.interpret(NATURAL))
+    else:
+        assert asyncio.run(interpreter.interpret(NATURAL)).command is not None
+    assert len(calls) == expected_calls
+
+
+def test_sdk_returns_grounded_command_from_compact_typed_extraction():
+    command = InvoiceCommand(client="ООО Ромашка", year=2026, month=9)
+    sdk = FakeSdk(Extraction(action="create_invoice", client=command.client, year=command.year, month=command.month))
     async def scenario():
         return await CommandInterpreter(
             api_key=SecretStr("sk-test-secret"), model="gpt-5-mini", sdk_client=sdk,
@@ -113,7 +159,8 @@ def test_sdk_returns_existing_pydantic_command_without_json_parsing():
     result = asyncio.run(scenario())
     assert isinstance(result.command, InvoiceCommand)
     assert result.command == command
-    assert sdk.responses.kwargs["text_format"] is InvoiceCommand
+    assert sdk.responses.kwargs["text_format"] is Extraction
+    assert set(Extraction.model_fields) == {"action", "client", "year", "month"}
     assert sdk.responses.kwargs["store"] is False
 
 
@@ -146,7 +193,7 @@ def test_sdk_malformed_or_refused_output_is_rejected():
 def test_official_sdk_parse_path_is_typed_and_structured():
     async def scenario():
         def respond(request):
-            payload = InvoiceCommand(client="ООО Ромашка", year=2026, month=9).model_dump_json()
+            payload = Extraction(action="create_invoice", client="ООО Ромашка", year=2026, month=9).model_dump_json()
             return httpx2.Response(200, json={
                 "id": "resp_test", "object": "response", "created_at": 1,
                 "status": "completed", "model": "gpt-5-mini", "output": [{

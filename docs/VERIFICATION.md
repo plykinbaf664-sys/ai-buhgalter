@@ -1,5 +1,60 @@
 # Verification Guide
 
+
+## Uncertain speech and failed-read recovery
+
+- Full `.venv/Scripts/python.exe -m pytest -q`: **507 passed in 31.00s**. Focused voice/client-choice/FirstBit regression passed 151 cases before the additional acronym/edit/audit cases; the final full run includes all additions. Tests cover uncertain readonly exact/duplicate company choice before history, explicit selection, short misheard acronym suggestions, uncertain edit revocation without financial reads, readonly `/retry` without STT/LLM, cancellation and redacted HTTP/transport audit codes. Existing fake uncertainty checks remain green.
+- `scripts/firstbit_readonly_smoke.py`: **PASS**, 96 synthetic GETs / four mocked AI calls, no production contact/mutations/PDF. `live_smoke()` with private ENV loaded: **PASS**, actual existing one-line preview and unchanged refresh; production GET only, no Telegram/OpenAI in that check.
+- Reloaded only the owned app process; retained the ngrok endpoint/webhook. Old process-local buttons are invalidated. `scripts/check_demo_ready.py --deep`: **READY** for all five checks after reload, including actual grounded OpenAI patch and production FirstBit metadata GET; writes false.
+- `compileall` and `git diff --check`: **PASS**. No new metadata properties or production records added to Git. Historical generic FirstBit failures cannot be retroactively assigned a specific HTTP/network cause.
+- Actual signed operator text through the updated public ngrok webhook: **PASS**; real OpenAI interpretation, real FirstBit GET resolution, actual Telegram historical-source review delivered to the confirmed owner. Review was left for the owner; no production click was simulated. This verifies text transport/provider resolution, not a new human voice E2E. Private report: `.local/runtime/runtime-recovery-public-check.json`.
+
+## Ngrok migration
+
+- `scripts/start_readonly_demo.py`: READY using ngrok; existing app and its process-local draft retained. Old owned Cloudflare tunnel stopped only after public health and Telegram registration succeeded.
+- `scripts/check_demo_ready.py --deep`: READY for local/public health, matching Telegram webhook and empty queue, production FirstBit metadata GET, and grounded OpenAI parsing. FirstBit writes remain disabled.
+- Public ngrok webhook rehearsal: unsigned request rejected with 403; signed operator `/start` accepted with 200 and delivered to the owner's Telegram. This is a transport check, not a human voice invoice test. No FirstBit contact in `/start`.
+- Focused `tests/test_demo_runtime.py`: 18 passed. Agent inspection/logging disabled; token supplied through ENV/SecretStr; local binary/config/state ignored under `.local/`. Explicit ngrok `--restart` was not exercised against the live draft.
+- Full regression `python -m pytest -q`: **499 passed in 30.38s**. Updated launchers pass `compileall` and `git diff --check`.
+
+
+## Voice latency: Telegram redelivery wait
+
+Actual slow update evidence: voice download started at 18:02:29 UTC, failed at 18:02:40, response delivery failed at 18:02:43, and Telegram retried delivery at 18:04:45. The next text update completed in 10.5 seconds. The long observed wait was network failure plus webhook redelivery backoff, not a minute of successful accounting computation.
+
+- Voice file lookup and download now each tolerate one transient read failure. Lookup is bounded at 5s/attempt (4s HTTP timeout); download at 12s/attempt (8s HTTP timeout). Status/auth, invalid paths, sizes or data do not retry. Only getFile and validated file GET use this helper; never sendMessage/sendDocument.
+- The real Telegram HTTP transport retries one connection-establishment failure only, with TLS and trust_env=False. Read/write uncertainty is not retried by delivery, preserving PDF safeguards. A safe `interpret/parsed` audit marker separates language parsing from FirstBit resolution; no source text is logged.
+- Focused voice/webhook/client-choice regression: **113 passed**. Full regression: **488 passed**. Tests inject a single lookup/download timeout and prove recovery without Telegram update redelivery, extra STT or document creation.
+- Actual Telegram upload/getFile/download rehearsal passed with an existing synthetic 83,030-byte OGG/Opus file: **0.28s** lookup+download. Technical voice was delivered only to the confirmed owner; no FirstBit contact or business-data input in this rehearsal. This is download timing, not full voice-to-preview latency. Private safe report `.local/runtime/telegram-voice-latency.json`.
+- Restart with secure webhook **READY** after retrying a transient Cloudflare DNS creation failure. `scripts/check_demo_ready.py --deep` again **READY** for all five checks, writes false. Metadata/business-write guards unchanged; no new metadata fields or production dumps.
+
+## Network recurrence: customer-demo hardening
+
+Final redeployment verification: secure webhook READY without dropping updates; tunnel log `protocol=http2`; `check_demo_ready.py --deep` READY again after restart. Signed public-webhook operator text completed actual OpenAI/FirstBit resolution and actual Telegram delivery to the confirmed owner. A fresh historical-source review is left to the owner, not simulated in production. Private report remains `.local/runtime/runtime-recovery-public-check.json`; no new human voice success is claimed from that text rehearsal.
+
+- `.venv/Scripts/python.exe -m pytest -q`: **486 passed** (28.99s). New cases prove a same-input SDK parsing retry, no retry of invalid/refused output or auth/quota failures, bounded recovery from 503, explicit TCP HTTP/2 tunnel launch, private recognized-text feedback and no repeated STT on a duplicate update.
+- `.venv/Scripts/python.exe scripts/check_demo_ready.py --deep`: **READY** across local/public health, matching Telegram webhook with zero queued updates, actual FirstBit metadata GET and an actual grounded OpenAI date patch. Deep mode makes one paid AI parsing check (at most one network retry); no FirstBit mutation. Catalog-only mode does not assert API billing/inference availability.
+- `.venv/Scripts/python.exe .local/runtime/check_company_voice.py`: **PASS**, actual STT/LLM/FirstBit with existing synthetic OGG/Opus: preview, date edit, read-only refresh; 47 GETs, zero mutations, isolated simulated Telegram/supplier review. No new human voice success is inferred from this rehearsal.
+- `compileall`, `git diff --check`: **PASS**.
+
+Observed cause was actual `openai_timeout` after successful STT and renewed QUIC/DNS transport failures, with three Telegram updates waiting. The tunnel is now configured for TCP HTTP/2; logs confirm `protocol=http2`. Interpretation alone may retry a transient SDK call once under a 40s total budget (25s attempt timeout); STT, schema validation and document execution are not replayed. This is resilience to transient failures, not a guarantee against loss of Internet/VPN/host power. A permanent server/domain remains an owner-supplied deployment prerequisite; no unapproved remote hosting or secret transfer occurred.
+
+## 2026-10-27: runtime recovery and complete read-only preview check
+
+Final deployment: `scripts/start_readonly_demo.py --restart` **READY**. `.local/runtime/check_recovery_public.py` **PASS**: local/public health 200, signed operator text → actual OpenAI → actual FirstBit read resolution → actual Telegram delivery to the confirmed owner. The fresh supplier-review callback was not simulated in the running app; owner retains that choice. `getWebhookInfo` confirms the active tunnel URL and **0 pending updates**; writes remain false. Private report `.local/runtime/runtime-recovery-public-check.json`. This public delivery test used text; voice evidence below is synthetic audio. No permanent hosting/VPN-independent uptime claim follows.
+
+- `.venv/Scripts/python.exe -m pytest -q`: **479 passed** (28.26s). Added regressions for tunnel API-error URL rejection, transient identical GET recovery, short spoken brands within long legal names, model create-label repair restricted to an existing preview, identical tax deduplication vs conflicting values, legacy display rename conversion, complete verbatim title and wrong-row blocking. Existing write/recovery/security guards remain green.
+- `.venv/Scripts/python.exe -m pytest -q tests/test_demo_runtime.py`: **6 passed**; focused preview suite **46 passed** after final row-scope correction. Before the final caption cases, combined preview/workflow check passed 83 cases; final full suite above covers all changes.
+- `scripts/firstbit_readonly_smoke.py`: **PASS**, synthetic application flow, 96 GETs / 4 mocked AI requests, zero mutations/PDF.
+- Private `.local/runtime/check_company_voice.py`: **PASS**, actual OpenAI STT/LLM + FirstBit, existing synthetic OGG/Opus → real preview → date edit → read-only refresh; 47 GETs / zero mutations. Telegram/review in the isolated rehearsal were simulated. This is not a new human voice E2E.
+- Private `.local/runtime/check_carville_recovery.py` with `CARVILLE_CHECK_TEXT=1`: **PASS**, actual OpenAI/FirstBit short-name lookup → three candidates → isolated explicit target and historical-source choices → one-line real preview → combined price/VAT/complete-description edit → read-only refresh. 63 GETs, zero mutations/PDF. Only synthetic operator text and simulated Telegram callbacks; names, IDs and financial snapshots are not Git fixtures. A separate fresh TTS generation timed out; no successful new-company synthetic voice is claimed. The existing synthetic voice check above independently verifies actual STT/LLM.
+- Targeted real GET reproduced Latin short-name suggestions but no Cyrillic short-brand candidate before the fix. After local phonetic/token matching, the correct already owner-named company is among three suggestions, never automatically chosen. No new metadata property or full bundle load was needed.
+- `compileall`, `git diff --check`: **PASS**. Runtime state/logs/reports stay ignored under `.local`; no production records added to Git.
+
+Incident evidence: expired temporary tunnel, transient DNS/network failures, and later FirstBit/Telegram timeouts after an actual human candidate selection. The application had already passed voice recognition. A stale tunnel PID was reused by an unrelated process; no foreign process was stopped. The stale state was archived only after checking workspace ownership, absent local health and no owned live process. The launcher now accepts a URL only after a successful tunnel announcement, so api.trycloudflare.com in an error is not mistaken for a public webhook. GET-only retry is limited to one additional identical request after transport error/timeout; status/auth/schema/money/cancellation do not retry.
+
+FirstBit contact was GET-only. Authorized external side effects were paid AI rehearsals and Telegram tunnel/webhook/message operations. Create/post/PDF and current accounting/write-admission gates remain outside scope. [Recovery ExecPlan](../.agent/plans/runtime-recovery.md).
+
 ## Latest: voice company search without exact spelling
 
 Deployment/public check: `scripts/start_readonly_demo.py --restart` **READY**, secure webhook refreshed, pending updates retained, writes false. `.local/runtime/check_company_search_public.py` **PASS**: local/public health 200, signed operator Cyrillic spoken-name text → real OpenAI/FirstBit → actual Telegram candidate buttons in the confirmed owner's chat. No production-app user choice was simulated; it awaits the actual owner's callback. This delivery check used text, not human audio. Private status only, no company record dump.

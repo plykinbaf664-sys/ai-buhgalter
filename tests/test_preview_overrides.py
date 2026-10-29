@@ -352,3 +352,61 @@ def test_model_tax_label_is_normalized_from_literal_percentage_and_rename_prefix
     result = prepared(flow)
     assert result.preview.lines[0].tax.treatment == "zero_rated"
     assert result.preview.lines[0].description == "Новое обслуживание"
+
+
+@pytest.mark.parametrize("new_scope", [False, True])
+def test_model_create_label_on_field_patch_is_repaired_only_for_existing_scope(flow, new_scope):
+    text = ("Создай новый счёт, " if new_scope else "") + "В первой строке цена 1500"
+    old = button(flow)
+    before = len(flow["fixture"].calls)
+    flow["outputs"].append({"action": "create", "client_change": None, "date_change": None,
+        "period_change": None, "line_changes": [], "tax_change": None,
+        "previous_hint_request": None, "clarification": None,
+        "preview_changes": [price(text, "1500", 1)]})
+    send(flow, text)
+    if new_scope:
+        assert not flow["client"].app.state.bot.pending
+        assert len(flow["fixture"].calls) == before
+    else:
+        assert prepared(flow).preview.lines[0].price == 1500
+        assert button(flow) != old
+
+
+def test_legacy_rename_and_duplicate_identical_tax_are_one_grounded_patch(flow):
+    text = "В первой строке цена 1500, НДС 0%, назови услугу Новое обслуживание"
+    flow["outputs"].append({"action": "create", "client_change": None, "date_change": None,
+        "period_change": None, "line_changes": [{"kind": "add", "line_number": None,
+            "new_service_name": span(text, "Новое обслуживание"), "quantity": None}],
+        "tax_change": {"source_span": span(text, "НДС 0%,"), "mode": "profile", "profile_span": span(text, "0%,")},
+        "previous_hint_request": None, "clarification": None,
+        "preview_changes": [price(text, "1500,", 1), tax(text, "0%,", 1)]})
+    original = prepared(flow)
+    send(flow, text)
+    result = prepared(flow)
+    assert result.preview.lines[0].price == 1500 and result.preview.lines[0].tax.rate == 0
+    assert result.preview.lines[0].description == "Новое обслуживание"
+    assert result.preview.lines[0].service_id == original.preview.lines[0].service_id
+    assert result.preview.lines[1] == original.preview.lines[1]
+    assert len(result.preview.user_overrides) == 1
+
+
+def test_different_tax_values_in_one_message_still_fail_closed(flow):
+    text = "В первой строке НДС 0% и НДС 5%"
+    before = len(flow["fixture"].calls)
+    send(flow, text, [tax(text, "0%", 1), tax(text, "5%", 1)])
+    assert not flow["client"].app.state.bot.pending
+    assert len(flow["fixture"].calls) == before
+
+
+def test_explicit_final_rename_keeps_last_word_omitted_by_model_span(flow):
+    text = "В первой строке назови услугу Бухгалтерское обслуживание за тестовый период"
+    send(flow, text, [name(text, "Бухгалтерское обслуживание за тестовый", 1)])
+    assert prepared(flow).preview.lines[0].description == "Бухгалтерское обслуживание за тестовый период"
+
+
+def test_rename_literal_cannot_move_from_explicit_second_row_to_first(flow):
+    text = "В первой строке цена 1500. Во второй строке назови услугу Новое обслуживание"
+    before = len(flow["fixture"].calls)
+    send(flow, text, [name(text, "цена 1500.", 1)])
+    assert not flow["client"].app.state.bot.pending
+    assert len(flow["fixture"].calls) == before

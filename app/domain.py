@@ -41,6 +41,17 @@ class ResolvedServiceSelection(StrictModel):
 class ResolvedService(StrictModel):
     service_id: Label
     display_name: Label
+    code: str | None = Field(default=None, max_length=100)
+
+
+class ServiceCandidates(StrictModel):
+    candidates: tuple[ResolvedService, ...] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def unique(self):
+        if len({s.service_id for s in self.candidates}) != len(self.candidates):
+            raise ValueError("Duplicate service choices")
+        return self
 
 
 class TaxRequest(StrictModel):
@@ -82,21 +93,28 @@ class PreviewTaxRequest(StrictModel):
 class PreviewLineOverride(StrictModel):
     line_number: int = Field(ge=1, le=20)
     price: Money | None = None
+    amount: Money | None = None
+    currency: Literal["AED", "USD", "EUR", "GBP", "RUB"] | None = None
     description: Label | None = None
     tax: PreviewTaxRequest | None = None
 
     @model_validator(mode="after")
     def nonempty(self):
-        if self.price is None and self.description is None and self.tax is None:
+        if self.price is not None and self.amount is not None:
+            raise ValueError("Choose a unit price or a net line amount")
+        if self.currency is not None and self.price is None and self.amount is None:
+            raise ValueError("Currency requires an explicit amount")
+        if self.price is None and self.amount is None and self.description is None and self.tax is None:
             raise ValueError("Empty preview override")
         return self
 
 
 class ResolvedPreviewLineOverride(PreviewLineOverride):
     source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    source_id: Label | None = None
 
     def user_edit(self):
-        return PreviewLineOverride(**self.model_dump(exclude={"source_line_number"}))
+        return PreviewLineOverride(**self.model_dump(exclude={"source_line_number", "source_id"}))
 
 
 def tax_matches(request: PreviewTaxRequest, profile: TaxProfile) -> bool:
@@ -129,6 +147,12 @@ class PaymentTerms(StrictModel):
     delivery: Label
 
 
+class HistoricalSource(StrictModel):
+    source_id: Label
+    source_number: Label
+    source_date: InvoiceDate
+
+
 class HistoricalProposal(StrictModel):
     source_id: Label
     source_number: Label
@@ -138,11 +162,16 @@ class HistoricalProposal(StrictModel):
     entity_id: Label
     contract_entity_id: Label | None = None
     contract_entity_name: Label | None = None
+    sources: tuple[HistoricalSource, ...] = Field(default=(), max_length=20)
     # This provenance is preview-only; it is never a create payload/default policy.
     policy: Literal["historical_proposal_readonly"] = "historical_proposal_readonly"
 
     @model_validator(mode="after")
     def paired_entity_review(self):
+        if self.sources and (len({s.source_id for s in self.sources}) != len(self.sources)
+                or self.sources[0].source_id != self.source_id
+                or self.sources[0].source_number != self.source_number or self.sources[0].source_date != self.source_date):
+            raise ValueError("Invalid historical source set")
         if (self.contract_entity_id is None) != (self.contract_entity_name is None):
             raise ValueError("Contract entity review requires both identity and display name")
         if self.contract_entity_id == self.entity_id:
@@ -161,6 +190,7 @@ class InvoiceLine(StrictModel):
     tax_amount: Money
     total: Money
     source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
+    source_id: Label | None = None
 
     @model_validator(mode="after")
     def correct_totals(self):
@@ -175,6 +205,10 @@ class InvoiceLine(StrictModel):
         if edit.tax is not None and (tax is None or not tax_matches(edit.tax, tax)):
             raise UserProblem("Налоговая правка не подтверждена профилем 1С.")
         price = self.price if edit.price is None else edit.price
+        if edit.amount is not None:
+            price = (edit.amount / self.quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+            if (price * self.quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) != edit.amount:
+                raise UserProblem("Сумма строки не представима с этим количеством и ценой до копейки. Уточните количество или сумму.")
         profile = tax or self.tax
         subtotal = (self.quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
         amount = (subtotal * profile.rate / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
@@ -207,13 +241,20 @@ class InvoicePreview(StrictModel):
 
     @model_validator(mode="after")
     def correct_totals(self):
+        if self.historical_proposal is not None and self.historical_proposal.sources:
+            known_sources = {source.source_id for source in self.historical_proposal.sources}
+            if any(line.source_id not in known_sources for line in self.lines):
+                raise ValueError("Line source is outside the historical source set")
         if len({e.line_number for e in self.user_overrides}) != len(self.user_overrides):
             raise ValueError("Duplicate manual row override")
         for edit in self.user_overrides:
             if edit.line_number > len(self.lines):
                 raise ValueError("Manual edit outside preview")
             line = self.lines[edit.line_number - 1]
+            if edit.currency is not None and edit.currency != self.currency:
+                raise ValueError("User amount currency mismatch")
             if (edit.price is not None and edit.price != line.price
+                    or edit.amount is not None and edit.amount != line.subtotal
                     or edit.description is not None and edit.description != line.description
                     or edit.tax is not None and not tax_matches(edit.tax, line.tax)):
                 raise ValueError("Preview does not reflect the explicit user edit")
@@ -248,9 +289,14 @@ class InvoiceCommand(StrictModel):
     previous: Literal["none", "last", "previous_month", "usual"] = "none"
     legacy_period: bool = False
     preview_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
+    initial_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
 
     @model_validator(mode="after")
     def valid_period(self):
+        if self.initial_overrides and (self.preview_overrides or not self.services
+                or len({e.line_number for e in self.initial_overrides}) != len(self.initial_overrides)
+                or any(e.line_number > len(self.services) for e in self.initial_overrides)):
+            raise ValueError("Initial amounts require distinct requested service lines")
         if len({e.line_number for e in self.preview_overrides}) != len(self.preview_overrides):
             raise ValueError("Duplicate override row")
         if (self.year is None) != (self.month is None):
@@ -424,6 +470,19 @@ class ServiceProblem(UserProblem):
         super().__init__(message)
 
 
+class ServiceChoiceRequired(UserProblem):
+    def __init__(self, choices: ServiceCandidates, line_number: int = 1):
+        self.choices = ServiceCandidates.model_validate(choices)
+        self.line_number = line_number
+        super().__init__("Выберите услугу из справочника.")
+
+
+class InitialQuantityRequired(UserProblem):
+    def __init__(self, line_number: int, amount: Decimal, quantity: Decimal, uom: str):
+        self.line_number, self.amount, self.quantity, self.uom = line_number, amount, quantity, uom
+        super().__init__("Сумма строки не представима с этой ценой до копейки. Уточните количество.")
+
+
 class BackendFailure(Exception):
     """Adapter failure. Do not forward its message or payload to logs/users."""
 
@@ -461,7 +520,7 @@ class OneC(Protocol):
         """
         ...
 
-    async def resolve_service(self, client_id: str, query: str) -> ResolvedService:
+    async def resolve_service(self, client_id: str, query: str, *, selected_id: str | None = None) -> ResolvedService:
         """Read only. Resolve a human query to exactly one permitted stable service ID."""
         ...
 

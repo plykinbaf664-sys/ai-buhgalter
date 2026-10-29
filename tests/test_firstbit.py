@@ -230,6 +230,24 @@ def test_transport_timeout_safe(fixture):
         run(fixture, lambda b: b.resolve_client("ООО Синтетика"))
 
 
+@pytest.mark.parametrize("failure", [httpx.ConnectError, httpx.ReadTimeout])
+def test_transient_get_read_is_retried_once_without_changing_query(fixture, failure, caplog):
+    original = fixture.respond
+    failed = []
+    def transient(request):
+        if request.url.path.endswith("Catalog_Companies") and not failed:
+            failed.append(request)
+            fixture.calls.append(request)
+            raise failure("PRIVATE_NETWORK_ERROR_DO_NOT_LOG")
+        return original(request)
+    fixture.respond = transient
+    assert run(fixture, lambda b: b.resolve_client("ООО Синтетика")).client_id == ref(1)
+    pages = [r for r in fixture.calls if "$skip" in r.url.params]
+    assert len(pages) == 2 and pages[0].url == pages[1].url
+    assert {r.method for r in fixture.calls} == {"GET"}
+    assert "PRIVATE_NETWORK_ERROR" not in caplog.text
+
+
 def test_literal_injection_is_data(fixture):
     with pytest.raises(UserProblem):
         run(fixture, lambda b: b.resolve_client("x' or true or Description eq 'x&$top=999"))
@@ -447,3 +465,13 @@ def test_odata_int64_rejects_noncanonical_or_out_of_range_line_numbers(fixture, 
     fixture.records["Document_InventoryExpense"][0]["Inventory"][0]["LineNumber"] = number
     with pytest.raises(WorkflowFailure):
         run(fixture, prepare)
+
+
+def test_firstbit_read_failure_audit_code_is_bounded_and_redacted(fixture):
+    from app.service import safe_backend_error
+    fixture.status = 403
+    with pytest.raises(BackendFailure) as error:
+        run(fixture, lambda backend: backend.resolve_client('synthetic'))
+    assert safe_backend_error(error.value) == 'firstbit_get_failed_http_403'
+    assert safe_backend_error(BackendFailure('private body SECRET')) == 'BackendFailure'
+    assert safe_backend_error(ValueError('private body SECRET')) == 'ValueError'

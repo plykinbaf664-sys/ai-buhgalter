@@ -289,6 +289,8 @@ Real adapter work should introduce typed SecretStr-backed settings without weake
 
 ## Real FirstBit adapter direction
 
+Runtime recovery keeps the same one-worker architecture. The existing launcher distinguishes a created quick tunnel from API error URLs; stale foreign/reused PIDs are never stopped. FirstBit `_get` can repeat one fixed GET after transport timeout/error only, under existing request/service deadlines; validation/status errors remain single-attempt. Local patch normalization repairs identical duplicate fields and explicit display rename spans without model/provider IDs or a new write path. See `.agent/plans/runtime-recovery.md`.
+
 Client lookup now uses `app/company_names.py` over bounded fresh `CompanyName` pages from the existing adapter; `Company` details are read only for actual choices/selection. No persistent index or new service. `LanguageIntent.to_intent` can recover a missing client only from a verbatim explicitly delimited invoice phrase. Similarity/transliteration remains a button suggestion; IDs and provider data stay out of AI. See [company search](firstbit/COMPANY_SEARCH.md).
 
 Explicit user price/VAT/display-name revisions flow through typed `preview_overrides` in the existing draft/command/resolve_basis path. The model supplies spans; `app/numbers.py` supplies deterministic numbers, service binds source/line identity, provider verifies tax and computes totals. See [preview revisions](firstbit/PREVIEW_REVISIONS.md).

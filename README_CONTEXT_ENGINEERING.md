@@ -23,6 +23,7 @@ docs/
     ├── READONLY_PIPELINE.md  # implemented mapping, ENV, smoke, blockers
     ├── LIVE_DEMO.md          # running Telegram demo, restart, live STT/LLM status
     ├── PREVIEW_REVISIONS.md  # explicit price/VAT/name edits, source binding, no writes
+    ├── INITIAL_REQUESTS.md   # initial net amounts, service choices, per-line historical sources
     └── COMPANY_SEARCH.md     # local voice/transliteration/typo matching and user choices
 
 .agent/
@@ -33,7 +34,8 @@ docs/
     ├── client-choice-readonly.md   # explicit candidate buttons, no automatic duplicate selection
     ├── voice-history-preview.md   # source-supplier review, compact preview, real voice rehearsal
     ├── preview-price-tax-description.md # typed grounded manual revisions
-    └── voice-company-search.md # spelling-tolerant company lookup and verbatim fallback
+    ├── voice-company-search.md # spelling-tolerant company lookup and verbatim fallback
+    └── runtime-recovery.md     # tunnel/DNS recovery, bounded GET retry, grounded patch repair
 ```
 
 ## Why this exists
@@ -62,6 +64,10 @@ docs/
 4. старые сообщения/заметки.
 
 ## Maintenance
+
+Active ngrok demo launcher: `scripts/start_ngrok_demo.py`; `start_readonly_demo.py` delegates according to stored provider. URL validation and secure registration are shared in `register_demo_webhook.py`; deep readiness supports both whitelisted HTTPS tunnel providers. Operational evidence → `docs/firstbit/LIVE_DEMO.md`.
+
+Customer-demo connectivity/readiness: `scripts/check_demo_ready.py --deep`, `scripts/start_readonly_demo.py` (TCP HTTP/2), `app/ai.py` (bounded parsing-only network retry), `.agent/plans/runtime-recovery.md`. Diagnostics are CLI-only; no new public probe endpoint or persistent queue/worker was added.
 
 Voice company search and local name-only discovery: [COMPANY_SEARCH.md](docs/firstbit/COMPANY_SEARCH.md), `app/company_names.py`, `tests/test_company_search.py`. Approximate matching only suggests candidates; unique exact identities ignore case/spacing/punctuation. No directory data to AI/disk.
 
@@ -97,3 +103,6 @@ Read-only FirstBit implementation starts at `docs/firstbit/READONLY_PIPELINE.md`
 - no automatic mutation retry after uncertain outcome.
 
 При внедрении real 1C продолжай этот подход вместо наращивания только текстовых правил.
+
+
+Speech/read incident routing: `docs/firstbit/COMPANY_SEARCH.md` covers uncertain-STT company choice, short acronym suggestions and readonly `/retry`; `docs/firstbit/LIVE_DEMO.md` distinguishes inbound tunnel health from direct FirstBit/OpenAI egress. Regressions live in `tests/test_voice.py`, `tests/test_client_choice.py`, `tests/test_company_search.py`, and `tests/test_firstbit.py`.

@@ -1,5 +1,33 @@
 # Live Telegram read-only demonstration
 
+## Active tunnel: ngrok
+
+The owner requested replacing the repeatedly disconnecting Cloudflare tunnel. ngrok is now active; public health and the secure Telegram webhook were verified before the old Cloudflare process was stopped. The application itself was not restarted during the switch, preserving current process-local drafts/buttons. Payload inspection is disabled (`--inspect=false`), CLI logging is disabled, and agent API port 4047 is loopback-only. ngrok credentials pass via ENV/SecretStr, never CLI arguments/project config/logs. The existing external user config may be read for its token without modifying it.
+
+Start/verify the existing app and ngrok: `.venv/Scripts/python.exe scripts/start_ngrok_demo.py`. `scripts/start_readonly_demo.py` detects the recorded ngrok provider and delegates to this launcher, including `--restart` when explicitly needed to reload the app. The owned PID guard recognizes both providers and never stops unrelated processes. For a switch from a running Cloudflare demo, do not use `--restart`: the old app/tunnel stays until the new public health and Telegram registration succeed. On a new machine obtain the signed official ngrok Windows agent and place it under ignored `.local/tools/ngrok.exe`, then privately configure `NGROK_AUTHTOKEN`.
+
+Verified on the switched runtime: all five deep readiness checks READY, public unsigned webhook rejected with 403, signed operator `/start` accepted with 200 and delivered to the confirmed owner's Telegram. No invoice was requested in that transport rehearsal; it is not human-voice evidence. FirstBit remains GET-only. Agent downloaded from the official ngrok Windows download link, Authenticode `Valid`, signer ngrok Inc., version 3.39.13. Existing account credentials were reused; no new account, paid upgrade or remote deployment was assumed. Direct FirstBit/OpenAI connections and local-PC/network dependencies remain distinct from the selected incoming tunnel.
+
+## Voice download / redelivery latency follow-up
+
+A later slow voice failed Telegram file retrieval and then response delivery; Telegram redelivery added about two minutes. Healthy text processing in that sample was 10.5s. Voice lookup/download now have one bounded network retry, while the Telegram transport retries only connection establishment; uncertain send/PDF results still follow existing recovery. Actual synthetic Telegram file lookup/download measured 0.28s (83,030 bytes), distinct from total STT/LLM/FirstBit processing time. Full regression 488 passed; deep readiness returned READY after restart. The technical voice in the owner's chat belongs to this diagnostic, not an invoice or a new human-input test.
+
+## Pre-customer demo check
+
+Latest restart and final verification completed: TCP HTTP/2 is active, all five deep-readiness checks are READY after restart, and an actual Telegram prompt was delivered after real OpenAI/FirstBit resolution via a signed operator text. Fresh owner source review remains a real user action. Do not use old pre-restart buttons. The missing permanent server/domain was requested separately; no hosting or remote secret transfer has been assumed.
+
+The temporary tunnel now uses TCP HTTP/2 rather than QUIC/UDP. Command parsing tolerates one transient OpenAI timeout/connection/5xx failure, with 25s per attempt and a 40s total limit, without repeating transcription or executing an invoice. Auth/quota/validation errors remain closed. A recognized transcript can be returned only to its own private chat on an exhausted parsing failure; it is not logged or persisted.
+
+Run `.venv/Scripts/python.exe scripts/check_demo_ready.py --deep` before a presentation. It must report READY for local/public app, actual webhook/empty queue, FirstBit schema GET and one real grounded OpenAI patch. Deep mode uses the paid API and contains no production business data. The local computer/network and temporary tunnel remain deployment dependencies; permanent hosting needs an actual owner-provided server/domain. Current full regression **486 passed**, and actual synthetic voice/FirstBit preview/date/verify passed again (47 GETs, isolated simulated Telegram callbacks).
+
+## 2026-10-27 recovery
+
+Final restarted runtime: local and public health **200**, secure webhook matches the active tunnel, Telegram pending updates **0**. An authorized signed operator text reached actual OpenAI/FirstBit and delivered a fresh historical-source review prompt to the confirmed owner; the script did not click it. Private evidence `.local/runtime/runtime-recovery-public-check.json`. The demo is running locally with the existing temporary tunnel and current network connection, not a permanent-hosting availability guarantee.
+
+Recovered an expired quick tunnel and intermittent DNS/network failure; no unrelated process was stopped when its PID matched stale runtime state. The stale state was archived after ownership/liveness checks. The launcher now rejects an API URL from a failed tunnel-creation log instead of registering it as the public webhook. FirstBit can retry an identical GET once for transient transport errors/timeouts; status/validation failures stay closed.
+
+Current full regression: **479 passed**. Actual OpenAI STT/LLM with existing synthetic speech and FirstBit passed preview/date/refresh (47 GETs, isolated Telegram/review). A second owner-named company passed actual OpenAI text + FirstBit lookup/choice/preview/price/VAT/complete-title revision/refresh (63 GETs, isolated callbacks). An independent new TTS generation timed out, so no new-company voice success is asserted. Production FirstBit remains GET-only; no create/post/PDF. Details and actual commands: [VERIFICATION.md](../VERIFICATION.md).
+
 ## Latest company-name correction
 
 The updated bot was restarted and its secure webhook is ready, both local/public health 200. An authorized signed operator text using the Cyrillic spoken company name reached actual OpenAI/FirstBit and delivered actual company-choice buttons to the owner; the script left selection to the owner. Private evidence `.local/runtime/company-search-public-check.json`. Old buttons are invalid after restart; continue with the fresh choices or a new request.
@@ -76,3 +104,10 @@ On this machine `.local/tools/cloudflared.exe` was downloaded from the official 
 - `.local/firstbit/readonly-preview.txt`: private formatted FirstBit preview.
 
 All remain ignored. Future write admission still requires durable identity/uniqueness, current accounting/default rules, reconciliation and a separately approved draft-only test; posting and standard PDF follow separately.
+
+
+## Speech/read recovery follow-up
+
+Ngrok remains the active inbound tunnel: local/public health, Telegram webhook/queue, direct FirstBit metadata GET and OpenAI catalog checks passed. The latest available incident audits precede the ngrok migration: two uncertain-STT rejections, then parsed text requests failing in FirstBit resolution and separate Telegram delivery failures. The former generic BackendFailure erased the exact historical network/status cause; changing tunnel cannot prove or repair that direct egress failure. New safe audit codes distinguish timeout, transport, HTTP status and schema failure without URLs, raw text or provider payloads.
+
+Uncertain new voice now produces mandatory company choices in readonly mode, including one exact candidate; [search rules](COMPANY_SEARCH.md). Uncertain financial edits still require clarification. After a failed read, use `/retry` without recording again. There is no unconditional recognition guarantee for unintelligible audio or missing provider data.

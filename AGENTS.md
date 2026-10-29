@@ -31,10 +31,14 @@
 - Контракт OneC adapter, уже существующий в репозитории → `docs/onec-contract.md`
 - FirstBit read-only реализация, ENV, smoke и blockers → `docs/firstbit/READONLY_PIPELINE.md`
 - Живой Telegram demo, restart, STT/LLM status → `docs/firstbit/LIVE_DEMO.md`
+- Активный ngrok tunnel → `scripts/start_ngrok_demo.py`; общий launcher сохраняет provider из runtime state. Switch без restart сохраняет app/draft; inspection off, token ENV/SecretStr.
+- Восстановление туннеля, network GET retry и regression evidence → `.agent/plans/runtime-recovery.md`, `tests/test_demo_runtime.py`, `docs/VERIFICATION.md`
+- Готовность перед показом → `scripts/check_demo_ready.py --deep`; TCP HTTP/2, ограниченный retry только SDK-разбора, без повторного STT/execute → `app/ai.py`, `tests/test_ai.py`, `docs/firstbit/LIVE_DEMO.md`
 - Выбор клиента кнопками и безопасность callback → `.agent/plans/client-choice-readonly.md`, `tests/test_client_choice.py`
 - Голосовые варианты названия/регистр/опечатки → `docs/firstbit/COMPANY_SEARCH.md`, `.agent/plans/voice-company-search.md`, `app/company_names.py`, `tests/test_company_search.py`
 - Голос → исторический образец, конфликт поставщика и компактный preview → `.agent/plans/voice-history-preview.md`, `docs/firstbit/LIVE_DEMO.md`
 - Ручные правки цены/НДС/названия в preview → `docs/firstbit/PREVIEW_REVISIONS.md`, `.agent/plans/preview-price-tax-description.md`, `tests/test_preview_overrides.py`
+- Первоначальные net-суммы, произвольные услуги и per-line исторические источники → `docs/firstbit/INITIAL_REQUESTS.md`, `.agent/plans/initial-request-financial-lines.md`, `tests/test_initial_lines.py`
 - FirstBit исследование → `docs/firstbit/FIRSTBIT_INTEGRATION_EVIDENCE.md`
 - Покрытие private metadata → `docs/firstbit/FIRSTBIT_METADATA_COVERAGE.md`
 
@@ -62,7 +66,7 @@
 
 - Pydantic на внешних и критических внутренних границах; не заменяй typed models сырыми dict.
 - LLM не создаёт 1C IDs, цену, VAT, GL, договор или итоговые суммы.
-- Явную цену/ставку пользователя разрешено применить только как правку существующего preview: LLM выбирает spans, число декодируется детерминированно, налог подтверждается справочником. Ручные правки не допускаются к execute даже в fake; переименование сохраняет ID услуги. Исторический source/LineNumber привязываются локально, не моделью.
+- Явные первоначальные суммы и последующие правки привязываются к валидному historical baseline: LLM выбирает spans, числа декодируются детерминированно, налог подтверждается справочником. Net-сумма строки отличается от цены единицы. Ручные правки не допускаются к execute даже в fake; переименование сохраняет ID услуги. Per-line source/LineNumber привязываются локально, не моделью. Полные правила → `docs/firstbit/INITIAL_REQUESTS.md`.
 - Свободный текст используется только для parsing/read-only resolution.
 - До явного подтверждения документ не создаётся.
 - Любая attempted edit отзывает старое подтверждение.
@@ -78,6 +82,7 @@
 - Production POST/PATCH/DELETE не выполнять без отдельного явного разрешения владельца.
 - Runtime 1C identity — только dedicated least-privilege account; admin credentials запрещены.
 - Raw user/LLM text не может формировать произвольный OData query/filter.
+- FirstBit GET может повториться один раз только при transport error/timeout, с прежним URL, TLS и лимитами. HTTP status/auth, oversized response, schema/financial validation и cancellation не повторяются. К mutation/reconcile правилам эта read-only retry policy не относится.
 - FirstBit data не отправлять в LLM сверх минимально необходимого intent-context.
 - В real AI context передаются только boolean-признаки наличия полей локального draft; имена/ID/строки/цены FirstBit остаются локально.
 - Различие Entity текущего договора и posted source не исправляется автоматически. Исторический поставщик и организация договора проверяются GET; bot требует явного выбора образца перед preview. Это не подтверждает поставщика нового документа и не снимает write guard.
@@ -117,3 +122,6 @@ ExecPlan обязателен для:
 - отдельно скажи, был ли контакт с production;
 - отдельно скажи, были ли только GET или были side effects;
 - не называй real 1C flow готовым, пока write/post/PDF не проверены.
+
+
+Speech recovery: low-confidence new voice in real readonly mode must pass company-choice callbacks even for one exact identity; uncertain edits and fake/write paths stay fail closed. Read-only `/retry` reuses typed draft without STT/LLM. FirstBit audit codes are allowlisted; never log arbitrary BackendFailure text. See `docs/firstbit/COMPANY_SEARCH.md` and `.agent/plans/runtime-recovery.md`.
