@@ -1,5 +1,5 @@
 import hashlib
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Literal, Protocol
 
@@ -220,6 +220,24 @@ class InvoiceLine(StrictModel):
             raise UserProblem("Изменённая цена или налог дают недопустимую сумму. Проверьте строку.") from None
 
 
+class AccountingReference(StrictModel):
+    role: Label
+    reference_id: Label
+    label: Label
+
+
+class ExecutionReview(StrictModel):
+    # Adapter-produced proposal; never accepted from language/intent models.
+    policy: Literal["confirmed_historical_carryover_v1"]
+    schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    references: tuple[AccountingReference, ...] = Field(min_length=1, max_length=100)
+    payment_date: InvoiceDate
+    price_date: Annotated[datetime, Field(ge=datetime(2000, 1, 1), le=datetime(2100, 12, 31))]
+    line_uom_types: tuple[Literal["StandardODATA.Catalog_UOMClassifier", "StandardODATA.Catalog_UOM"], ...] = Field(min_length=1, max_length=20)
+
+
 class InvoicePreview(StrictModel):
     invoice_date: InvoiceDate
     supply_date: InvoiceDate | None = None
@@ -238,9 +256,13 @@ class InvoicePreview(StrictModel):
     previous_reference: Label | None = None
     historical_proposal: HistoricalProposal | None = None
     user_overrides: tuple[PreviewLineOverride, ...] = Field(default=(), max_length=20)
+    execution_review: ExecutionReview | None = None
+    write_blocker: Label | None = None
 
     @model_validator(mode="after")
     def correct_totals(self):
+        if self.execution_review is not None and (self.historical_proposal is None or self.write_blocker is not None):
+            raise ValueError("Invalid write review")
         if self.historical_proposal is not None and self.historical_proposal.sources:
             known_sources = {source.source_id for source in self.historical_proposal.sources}
             if any(line.source_id not in known_sources for line in self.lines):
@@ -416,6 +438,7 @@ class PreparedInvoice(StrictModel):
 
 class Invoice(StrictModel):
     document_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
+    number: Label | None = None
     posted: bool
     client_id: str = Field(min_length=1, max_length=200)
     basis_key: str = Field(min_length=1, max_length=200)
@@ -449,9 +472,72 @@ class PdfDocument(StrictModel):
         return value
 
 
+class TaxInvoiceReference(StrictModel):
+    document_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
+    source_document_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
+
+    @model_validator(mode='after')
+    def distinct_documents(self):
+        if self.document_id == self.source_document_id:
+            raise ValueError('Tax invoice must be a separate linked document')
+        return self
+
+
+class TaxInvoice(TaxInvoiceReference):
+    number: Label | None = None
+    posted: bool
+    client_id: str = Field(min_length=1, max_length=200)
+    basis_key: str = Field(min_length=1, max_length=200)
+    revision: str = Field(min_length=1, max_length=200)
+    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class TaxOperationState(StrictModel):
+    operation_id: str = Field(min_length=1, max_length=200)
+    source_document_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,100}$")
+    status: Literal['not_started', 'draft', 'posted', 'unknown']
+    invoice: TaxInvoice | None = None
+
+    @model_validator(mode='after')
+    def consistent_tax_state(self):
+        if self.status in ('draft', 'posted'):
+            if (self.invoice is None or self.invoice.source_document_id != self.source_document_id
+                    or self.invoice.posted != (self.status == 'posted')):
+                raise ValueError('Inconsistent tax operation state')
+        elif self.invoice is not None:
+            raise ValueError('Unknown/absent tax operation cannot carry a verified document')
+        return self
+
+
+class TaxPdfProvenance(TaxInvoiceReference):
+    document_revision: str = Field(min_length=1, max_length=200)
+    print_manager: Literal['Document.TaxInvoice']
+    template: Literal['TaxInvoiceLandscapeEN']
+
+
+class TaxInvoicePdf(PdfDocument):
+    provenance: TaxPdfProvenance
+
+
 class InvoiceResult(StrictModel):
     invoice: Invoice
-    pdf: PdfDocument
+    pdf: TaxInvoicePdf | PdfDocument | None = None
+    tax_invoice: TaxInvoice | None = None
+
+    @model_validator(mode='after')
+    def related_native_result(self):
+        if self.tax_invoice is not None:
+            tax = self.tax_invoice
+            if (not self.invoice.posted or not tax.posted or tax.source_document_id != self.invoice.document_id
+                    or tax.client_id != self.invoice.client_id or tax.basis_key != self.invoice.basis_key
+                    or tax.preview_digest != self.invoice.preview_digest or not isinstance(self.pdf, TaxInvoicePdf)
+                    or self.pdf.provenance.document_id != tax.document_id
+                    or self.pdf.provenance.source_document_id != self.invoice.document_id
+                    or self.pdf.provenance.document_revision != tax.revision):
+                raise ValueError('Tax invoice/PDF does not match the verified source operation')
+        elif isinstance(self.pdf, TaxInvoicePdf):
+            raise ValueError('Tax PDF requires verified linked tax invoice')
+        return self
 
 
 class UserProblem(Exception):
@@ -551,4 +637,28 @@ class OneC(Protocol):
 
     async def get_pdf(self, invoice: Invoice) -> PdfDocument:
         """Return the standard 1C print form; never render it in this app."""
+        ...
+
+class TaxInvoiceOneC(OneC, Protocol):
+    """Opt-in extension; no extra methods required from existing fake/readonly providers."""
+    requires_tax_invoice: bool
+
+    # Adapter obligations, not names/paths of claimed existing APIs.
+    async def read_tax_operation(self, basis: BillingBasis, invoice: Invoice,
+                                 operation_id: str) -> TaxOperationState:
+        """Read authoritative linked TaxInvoice state; absence after uncertainty is unknown."""
+        ...
+
+    async def ensure_tax_invoice(self, basis: BillingBasis, invoice: Invoice,
+                                 operation_id: str) -> TaxInvoiceReference:
+        """Call proved native GenerateTaxInvoice at most once; return a read-back hint."""
+        ...
+
+    async def ensure_tax_posted(self, basis: BillingBasis, invoice: TaxInvoice,
+                                operation_id: str) -> TaxInvoiceReference:
+        """Finalize the same tax document only if read-back says not posted."""
+        ...
+
+    async def get_tax_invoice_pdf(self, invoice: TaxInvoice) -> TaxInvoicePdf:
+        """Native TaxInvoiceLandscapeEN, with exact document/version provenance."""
         ...

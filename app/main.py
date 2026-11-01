@@ -14,7 +14,9 @@ from app.config import Settings
 from app.domain import OneC
 from app.fake_onec import FakeOneC
 from app.firstbit import FirstBit, FirstBitSettings
+from app.firstbit_write import FirstBitWrite
 from app.model_selection import OpenAIModelSelector
+from app.operations import OperationJournal
 from app.service import InvoiceService, event
 from app.telegram import DeliveryFailure, Telegram
 from app.telegram_models import Health, Update, WebhookAck
@@ -29,6 +31,30 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                firstbit_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     owned_backend = None
+    write_journal = None
+    if settings.mode == 'firstbit_write':
+        if backend is not None:
+            if (getattr(backend, 'write_capable', False) is not True or backend.is_fake is not False
+                    or not isinstance(getattr(backend, 'journal', None), OperationJournal)
+                    or backend.journal.path != settings.operation_db):
+                raise ValueError('firstbit_write requires a real writer with its durable journal')
+            write_journal = backend.journal
+        else:
+            provider_settings = FirstBitSettings.from_env(writable=True)
+            write_journal = OperationJournal(settings.operation_db,
+                namespace='invoice:v1:firstbit_write:' + hashlib.sha256(provider_settings.base_url.encode()).hexdigest())
+            if settings.firstbit_native_ui_enabled:
+                from app.firstbit_production import FirstBitProduction
+                from app.firstbit_ui import FirstBitUI
+                from pathlib import Path
+                ui = FirstBitUI(provider_settings,
+                    private_root=Path(__file__).resolve().parents[1]/'.local/firstbit/native-ui')
+                owned_backend = FirstBitProduction(provider_settings, journal=write_journal,
+                    schema_sha256=settings.firstbit_write_schema_sha256, transport=firstbit_transport, ui=ui)
+            else:
+                owned_backend = FirstBitWrite(provider_settings, journal=write_journal,
+                    schema_sha256=settings.firstbit_write_schema_sha256, transport=firstbit_transport)
+            backend = owned_backend
     if settings.mode == "firstbit_readonly":
         if backend is not None:
             if getattr(backend, "preview_only", False) is not True or backend.is_fake is not False:
@@ -36,9 +62,15 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
         else:
             owned_backend = FirstBit(FirstBitSettings.from_env(), transport=firstbit_transport)
             backend = owned_backend
-    service = InvoiceService(backend if backend is not None else FakeOneC(settings.fake_onec_fault),
-                             timeout=45 if settings.mode == "firstbit_readonly" else 5,
-                             allow_real_writes=settings.onec_write_enabled)
+    chosen_backend = backend if backend is not None else FakeOneC(settings.fake_onec_fault)
+    scope = str(getattr(getattr(chosen_backend, "settings", None), "base_url", type(chosen_backend).__name__))
+    journal = write_journal or (OperationJournal(settings.operation_db,
+        namespace="invoice:v1:" + settings.mode + ":" + hashlib.sha256(scope.encode()).hexdigest(),
+        create=settings.mode == "mock")
+        if settings.operation_db is not None else None)
+    service = InvoiceService(chosen_backend,
+                             timeout=90 if settings.mode == 'firstbit_write' else 45 if settings.mode == "firstbit_readonly" else 5,
+                             allow_real_writes=settings.onec_write_enabled, journal=journal)
     # Stage-1 mock only, bounded and never evicted during process lifetime.
     # Refuse overflow rather than silently forgetting deduplication records.
     receipts: dict[int, Receipt] = {}
@@ -83,7 +115,24 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                     model_selector=model_selector if settings.stt_model == "auto" else None,
                 ) if settings.ai_mode == "openai" else None)
                 app.state.bot = Bot(service, telegram, interpreter, speech)
-                yield
+                schema_task = None
+                if settings.firstbit_native_ui_enabled and owned_backend is not None:
+                    from app.schema_monitor import monitor_schema
+                    from pathlib import Path
+                    async def schema_alert():
+                        event(request_id='schema-monitor', user_id=0, stage='schema', status='blocked')
+                    schema_task = asyncio.create_task(monitor_schema(owned_backend,
+                        status_path=owned_backend.ui.root/'schema-health.json',
+                        alert=schema_alert))
+                try:
+                    yield
+                finally:
+                    if schema_task is not None:
+                        schema_task.cancel()
+                        try:
+                            await schema_task
+                        except asyncio.CancelledError:
+                            pass
             finally:
                 if openai_client is not None:
                     await openai_client.close()

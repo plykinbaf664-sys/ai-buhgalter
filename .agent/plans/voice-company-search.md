@@ -1,5 +1,7 @@
 # Voice company resolution without exact spelling requirements
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/COMPANY_SEARCH.md](../../docs/firstbit/COMPANY_SEARCH.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal and evidence
 Latest actual voice audit passed STT, then stopped at resolve/client. Transcripts and old Telegram replies are intentionally not persisted; their exact wording cannot be recovered from this audit. Existing adapter uses a whole-name server substring search before local casefold; a case-sensitive server, punctuation differences or Cyrillic speech for Latin company names can therefore hide valid candidates. The current fake server's case-insensitive matching does not reproduce that boundary.
 

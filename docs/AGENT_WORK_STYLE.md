@@ -67,7 +67,7 @@ Never fix an OData path error by trying guessed field variants in production loo
 
 ## Side-effect discipline
 
-Read-only task means:
+For FirstBit/OData, a read-only task means (Telegram/OpenAI calls are separate external side effects and must be reported):
 - GET only;
 - no POST/PATCH/DELETE;
 - no write flag enablement;

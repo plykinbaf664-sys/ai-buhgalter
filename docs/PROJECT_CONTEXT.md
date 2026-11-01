@@ -1,208 +1,54 @@
-# Project Context
+# Project context
 
-## Product
+## Scope and current milestone
 
-Telegram-бот для подготовки счетов в FirstBit ERP / 1C.
+Telegram assistant for an accountant preparing invoices in FirstBit ERP / 1C. Version `0.2.0`, Python >=3.10. Historical read-only InvoicePreview remains supported. Controlled-create and optional native TaxInvoice/PDF adapters are implemented; a controlled production E2E completed with recovery, native PDF and Telegram delivery. The current write source of truth is [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
-Целевой пользователь — бухгалтер. Основной сценарий:
+| Mode | Provider | Current outcome |
+|---|---|---|
+| `mock` (factory default) | `FakeOneC` with fictitious data | Preview -> confirmation -> fake create/post -> TEST/MOCK PDF |
+| `firstbit_readonly` | Real GET-only `FirstBit` | Verified client/contract/services/history -> historical preview -> fresh verification; stop |
+| `firstbit_write` | `FirstBitWrite` extends the reader | Reviewed accounting proposal -> explicit confirmation -> controlled draft; optional native provider continues through linked TaxInvoice/PDF. Admission/proof: PRODUCTION_OPERATION |
 
-```text
-текст/voice
-→ распознать намерение
-→ однозначно найти клиента/услуги/основание
-→ получить полный invoice preview
-→ человек подтверждает / правит / отменяет
-→ создать и провести один документ
-→ получить штатный PDF из 1C
-→ отправить PDF в Telegram
-```
+Mock/readonly modes reject `ONEC_WRITE_ENABLED=true`; fake mutations remain in-memory simulation. Real modes require their separately attested dedicated identity and never substitute fake records on failure. Deployment is a supervised single-worker Linux service; local Windows/ngrok remains a fallback. Operations: [SERVER_DEPLOYMENT](SERVER_DEPLOYMENT.md); dated write rollout evidence: [ExecPlan](../.agent/plans/production-headless-e2e.md).
 
-## Current repository state
+## User scenario
 
-Текущий код — version `0.2.0`, Python `>=3.10`.
+Text or voice -> controlled intent -> local typed draft -> company/service resolution and clarifications -> historical proposal -> preview/edit/cancel/verify. Company-only discovery can happen before date/service completion. Multiple active catalog services are supported when the selected client's contract and verified per-service history support them; this is not a guarantee for every service/client or unintelligible speech.
 
-В репозитории реально реализованы:
-- FastAPI webhook;
-- Telegram allowlist + protected webhook;
-- text and voice paths;
-- OpenAI interpreter/STT behind `AI_MODE`;
-- strict Pydantic domain;
-- fake 1C adapter;
-- preview/edit/confirm/cancel;
-- FirstBit duplicate/partial-client candidate buttons, explicit selection and fresh GET revalidation;
-- create/post/PDF against fake;
-- retry/recovery behavior;
-- duplicate webhook protection;
-- mock PDF;
-- broad pytest suite.
+Explicit initial amounts/prices/tax are applied as user proposals after a verified historical baseline; omitted fields come from that service's source for the same client/contract. Net line amount is distinct from net unit price. Later edits do not silently reset other fields. The detailed financial policy lives in [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md) and [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md).
 
-**GET-only real adapter реализован и проверен live prepare/refresh** в `app/firstbit.py`; дополнительный случай с историческим поставщиком, отличным от договора, проверен через явный supplier review и реальную доставку preview в Telegram. Он строит historical proposal, а не готовый payload нового документа. Клиент задаётся Telegram-запросом; smoke ENV не ограничивает приложение. Другие клиенты также требуют своих однозначных договоров и historical basis. Подробности: `firstbit/READONLY_PIPELINE.md`.
+Company spelling/case/legal-form variations and fuzzy suggestions use [COMPANY_SEARCH](firstbit/COMPANY_SEARCH.md). A company selection only confirms identity. Service selection, quantity clarification and historical-source supplier review may still be needed. Missing history is a blocker, not permission to borrow another client's parameters.
 
-`app/config.py` разрешает:
+## Domain and actors
 
-```text
-APP_MODE=mock
-# либо firstbit_readonly
-```
+Telegram is transport/UI; LLM/STT interprets user language; application controls state and validation; the OneC provider resolves verified accounting facts. AI is not an accounting authority.
 
-`create_app()` создаёт `FakeOneC` в mock и `FirstBit` из ENV в firstbit_readonly. `ONEC_WRITE_ENABLED=true` запрещён в обоих режимах.
+- `InvoiceIntent` / `InvoiceDraft`: grounded changes and local incomplete conversational state.
+- `InvoiceCommand`: client text, document date, optional service period, services, tax/history requests, initial or existing-preview overrides.
+- `ResolvedInvoiceCommand`: stable client/service IDs and locally bound override provenance.
+- `BillingBasis`: exactly `key`, `client_id`, `revision`, `preview`. No separate contract/entity columns were added.
+- `InvoicePreview`: validated dates/parties/currency/lines/totals and optional typed historical provenance. Ordinary fake document previews require full requisites; historical proposals explicitly allow unresolved new-document defaults.
+- `HistoricalProposal.sources` / line `source_id` and `source_line_number`: per-line sources for multi-service proposals; primary source retained.
+- `PreparedInvoice`: resolved request + basis + display name. `Invoice`: returned document identity plus confirmed preview digest.
+- `OperationState`: `not_started | draft | posted | unknown`; real reader returns `unknown` and does not claim authoritative document reconciliation.
 
-## Runtime shape today
+Exact API/types: [onec-contract](onec-contract.md), `app/domain.py`. Runtime/state ownership: [ARCHITECTURE](ARCHITECTURE.md). Flow transitions: [SYSTEM_MAP](SYSTEM_MAP.md).
 
-Один Python process:
-- FastAPI;
-- Uvicorn;
-- HTTPX;
-- OpenAI SDK when enabled;
-- no database;
-- no queue;
-- no Redis;
-- no background worker.
+## Current boundaries
 
-Process-local state:
-- webhook receipts;
-- pending confirmations;
-- draft contexts;
-- recovery operations;
-- fake 1C documents;
-- delivered/delivery-attempted sets.
+Real FirstBit supplies present read-only identities/history/tax/currency/UOM facts. Defaults are not inferred: supported native admission validates historical accounting carryover and live references, including effective supplier VAT registration. Unsupported cases remain explicit blockers. Historical posted prices are proposals, not permanent current tariffs. Fake instead uses current fake-catalog prices; this difference must be preserved. Provider facts and exact consumed mapping: [integration evidence](firstbit/FIRSTBIT_INTEGRATION_EVIDENCE.md), [read-only pipeline](firstbit/READONLY_PIPELINE.md).
 
-После process restart эта state не является durable.
+Readonly confirmation only refreshes the proposal. An admitted native confirmation executes the guarded source/linked-document/PDF flow. `/retry` has separate readonly draft and frozen operation branches. A cancellation does not roll back an already started financial operation. Default state is process-local; restart invalidates choices/confirmation/receipts. An optional confirmed-operation journal is implemented, but production write idempotency/E2E remains unproved; see PRODUCTION_OPERATION. No external database or queue is required.
 
-## Product actors
+## Remaining milestones
 
-### Accountant
-Формулирует запрос и подтверждает финальные финансовые значения.
+1. Preserve the supported read-only rollout; extend financial variants only with proven metadata/business semantics and tests. Unknown values, included VAT/discounts and missing history currently block.
+2. Before controlled real draft-write: prove current supplier/defaults, pricing approval and tax applicability, exact create behavior, least-privilege write permissions, atomic business uniqueness, durable operation/receipt/recovery state, stale-basis protection and authoritative lost-response reconciliation. A reviewed metadata/permission baseline and restart/concurrency tests are required. This is not enabled by flipping an existing flag.
+3. Separately admit and inspect a controlled real draft in an explicitly approved target.
+4. Separately implement/verify posting, then standard FirstBit PDF; never use mock PDF as an official invoice.
+5. Only then demonstrate real writable text/voice E2E, including failure/restart/delivery scenarios. Multi-worker deployment requires durable coordination first.
 
-### Telegram
-Transport/UI only. Не является financial state store.
+Write admission/security checklist is owned by [SECURITY](SECURITY.md); transactional adapter obligations by [onec-contract](onec-contract.md). Read-only success does not prove any later milestone.
 
-### LLM/STT
-Помогает понять язык. Не является source of truth.
-
-### Application
-Управляет state machine, preview/revision, confirmation, retry/recovery.
-
-### OneC adapter
-Контракт определён в `app/domain.py:OneC` и подробно описан в `docs/onec-contract.md`.
-
-### FirstBit ERP / 1C
-Будущий production source of truth для:
-- companies;
-- contracts;
-- services/items;
-- VAT/tax profiles;
-- GL;
-- bank/payment data;
-- invoice documents;
-- standard PDF.
-
-## Existing domain contract
-
-### `InvoiceCommand`
-Содержит:
-- client text;
-- invoice date;
-- optional service period;
-- service selections;
-- tax request;
-- previous-invoice intent.
-
-### `ResolvedInvoiceCommand`
-Уже содержит stable client/service IDs.
-
-### `BillingBasis`
-**Текущая code schema**:
-
-```text
-key
-client_id
-revision
-preview
-```
-
-Не утверждать, что она уже содержит отдельные company/contract/entity refs. Для real adapter можно расширить модель, но это будет публичное изменение, которое требует поиска всех usages и тестов.
-
-### `InvoicePreview`
-Typed full snapshot с:
-- invoice/supply date;
-- optional service period;
-- currency;
-- issuer/recipient;
-- bank;
-- payment terms;
-- 1–20 lines;
-- totals;
-- amount in words;
-- reference/previous reference.
-
-Preview arithmetic валидируется моделью.
-
-Для historical proposal добавлен typed `HistoricalProposal` с source/contract/entity provenance. Банковские условия, дата оказания, контакты и сумма прописью могут отсутствовать только у такого явно неисполняемого предложения; обычный preview сохраняет требование полных реквизитов. Неподтверждённые финансовые значения строк блокируют proposal. Неподтверждённые defaults нового документа блокируют write. См. точный список ограничений в FirstBit guide.
-
-### `PreparedInvoice`
-Связывает resolved request + basis + display name.
-
-### `Invoice`
-Связывает real/fake document с:
-- `document_id`;
-- posted state;
-- client ID;
-- basis key;
-- revision;
-- `preview_digest`.
-
-### `OperationState`
-`not_started | draft | posted | unknown`.
-
-## Current user flow guarantees
-
-- Любая команда требует preview confirmation.
-- Pending confirmation живёт 5 минут.
-- Любая попытка правки отзывает старый token confirmation до нового parsing/resolution.
-- При изменении basis/revision перед подтверждением показывается новый preview.
-- `/retry` работает только с frozen previous operation.
-- Новая команда блокируется, пока operation в recovery.
-- Cancel не означает rollback уже начатой financial operation.
-
-## FirstBit production evidence discovered outside current repo
-
-Read-only Standard OData:
-- работает Basic Auth для integration user;
-- опубликован MVP whitelist из 33 объектов;
-- подтверждены Companies, Contracts, Items, registers, Invoice (`Document_InventoryExpense`);
-- обычный Invoice = `Document.InventoryExpense`;
-- `Accounting and bookkeeping services` — реальный service Item;
-- `ItemPrices` для этой услуги не даёт authoritative current price;
-- invoice history показывает client-specific recurring price/quantity;
-- один invoice может содержать несколько одинаковых accounting service rows;
-- у default contract `PriceKind`, `SalesPaymentTerms`, `DeliveryTerms` могут быть ZERO GUID;
-- historical `PaymentTermsVersion_Key` нельзя слепо переносить в новый invoice.
-
-Эти факты должны войти в real adapter, но **не выдаются за уже реализованный код**.
-
-## Important fake-vs-production divergence
-
-Fake сейчас моделирует другой pricing assumption:
-- previous invoice = hint;
-- current price берётся из fake catalog.
-
-Это закреплено тестом текущего fake workflow.
-
-Для исследованной production FirstBit базы этот rule не доказан и для bookkeeping service фактически не поддержан ItemPrices. Real adapter должен иметь собственную безопасную resolution policy.
-
-## Product invariants
-
-Company voice lookup accepts case/spacing/punctuation variants and offers local transliteration/typo candidates. Company names remain local; similarity never supplies an automatic identity. Missing client output from AI can be repaired only by a verbatim explicit invoice phrase, followed by normal resolution. See `firstbit/COMPANY_SEARCH.md`.
-
-- Human confirmation before write.
-- 1C is financial source of truth.
-- LLM cannot invent financial entities/values.
-- Explicit user price/VAT/display-name corrections are supported on existing preview as marked, non-executable proposals; deterministic span decoding, source/line binding and actual tax catalog verification are required. See `firstbit/PREVIEW_REVISIONS.md`.
-- Invoice date != service period.
-- Stable IDs after read-only resolution.
-- Ambiguity stops the workflow.
-- Unknown operation state blocks mutation.
-- Lost HTTP response != rollback.
-- Same billing identity should not create duplicate invoice.
-- Production PDF comes from 1C.
+Confirmed-operation persistence preparation now exists as an optional journal, with remaining production admission/proof limits in [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md). This is not real FirstBit write/PDF completion; unconfirmed drafts and receipts remain process-local.

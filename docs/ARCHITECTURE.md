@@ -1,380 +1,58 @@
 # Architecture
 
-## Technology actually present
+## Actual runtime
 
-Runtime:
-- Python >= 3.10
-- FastAPI 0.141.1
-- Pydantic 2.13.5
-- HTTPX 0.28.1
-- OpenAI SDK 3.20.0
-- Uvicorn 0.54.0
-- ReportLab 5.0.1 only for fake PDF
+Python >=3.10, FastAPI/Pydantic, HTTPX, official OpenAI SDK and Uvicorn; ReportLab/Pillow and embedded fonts implement mock PDF only. Exact versions are in `requirements*.txt`. One worker, one process-wide admission lock; default state is in-memory. An optional local SQLite confirmed-operation journal is implemented; no external DB/queue/Redis/background financial worker/Docker or CI pipeline is implemented.
 
-Test/dev:
-- pytest 9.1.1
-- PyMuPDF for PDF inspection
+`create_app()` defaults to FakeOneC. `APP_MODE=firstbit_readonly` constructs and closes a real reader; `firstbit_write` constructs its controlled-create subclass with a mandatory preprovisioned journal. Admission/limits are owned by [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md). Server/local launchers validate settings before starting. Host/service layout: [SERVER_DEPLOYMENT](SERVER_DEPLOYMENT.md); local fallback: [LIVE_DEMO](firstbit/LIVE_DEMO.md).
 
-No DB, queue, Docker, migrations or CI config were found in current `main`.
+Native production extends this same provider through app/firstbit_production.py. App/firstbit_tax.py owns typed OData TaxInvoice reconciliation; app/firstbit_ui.py owns serialized native browser navigation/actions/downloads under a dedicated Linux identity. App/schema_monitor.py is a periodic read-only health task, never a financial worker. Enablement and evidence boundaries are owned by [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
-## Actual module ownership
+## Module ownership
 
-### `app/domain.py`
-Owns domain contracts and safety types:
-- `StrictModel`, `ExternalModel`;
-- money/quantity/date bounds;
-- `InvoiceCommand`;
-- `ResolvedInvoiceCommand`;
-- `InvoicePreview`;
-- `BillingBasis`;
-- `PreparedInvoice`;
-- `Invoice`;
-- `OperationState`;
-- `PdfDocument`;
-- exceptions;
-- `OneC` Protocol.
+| Area | Files and responsibility |
+|---|---|
+| HTTP boundary | `app/main.py`: factory/lifespan, private-chat allowlist, webhook secret, body/read bounds, gate and receipts |
+| Domain/API | `app/domain.py`: frozen strict models, totals/digest, commands/basis/provenance/operation state and OneC Protocol |
+| Financial orchestration | `app/service.py`: prepare, source-bound overrides, request/provider consistency, refresh, fake execution/reconcile and safe audit |
+| Durable confirmed operations | `app/operations.py`: optional transactional journal consumed by service/Bot; admission/limits in [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md) |
+| Conversation | `app/bot.py`: local drafts, company/service/quantity/supplier choices, confirmation/edit/cancel/retry, receipt-based delivery |
+| Language | `app/ai.py`, `app/language.py`, `app/intent.py`, `app/numbers.py`, `app/parser.py`: schema-constrained parsing, source spans, deterministic numbers/dates and draft merge |
+| Voice/model choice | `app/voice.py`, `app/model_selection.py`: bounded transcription, confidence classification, supported model selection cached per process |
+| Real provider | `app/firstbit.py`: typed settings, fixed GET transport, fresh consumed-schema checks, identities/contracts/services/history/tax/currency/UOM and historical proposal |
+| Name matching | `app/company_names.py`: local canonical keys and approximate ranking; similarity is a suggestion, not identity authority |
+| Fake provider | `app/fake_onec.py`, `app/fake_data.py`: synthetic catalog, in-memory operations/faults; `app/mock_pdf.py` renders TEST/MOCK PDF |
+| Presentation/transport | `app/presentation.py`, `app/telegram.py`, `app/telegram_models.py`: preview text, validated Telegram delivery/file download; `app/http.py`, `app/validation.py`: bounded HTTP/JSON boundaries |
+| Configuration | `app/config.py`: supported modes, Telegram/OpenAI ENV and write/fault guards; FirstBitSettings lives in provider |
+| Operations | `scripts/run_server.py`, `scripts/server_control.py`, `deploy/`; Windows counterparts `scripts/run_local.py`, `start_readonly_demo.py`, `start_ngrok_demo.py`, `register_demo_webhook.py` |
 
-### `app/service.py`
-Financial orchestration:
-- `prepare`;
-- `refresh`;
-- `_read_state`;
-- `execute`;
-- write guard;
-- reconciliation after uncertain mutation;
-- safe audit events.
-
-### `app/bot.py`
-Telegram conversational/state-machine layer:
-- pending confirmation;
-- per-user expiring client-choice buttons, bound to the original typed command and candidate IDs;
-- separate expiring supplier review when historical issuer differs from the current contract; the review is scoped to client/contract/entity IDs and refreshed before showing the proposal;
-- edit/cancel;
-- retry;
-- draft context;
-- recovery freeze;
-- delivery dedupe.
-
-Real provider intent context contains only local field-availability booleans, without provider names/IDs/rows/prices. Raw user corrections still need grounded spans and local merge. Low-confidence STT retains its thresholds and shows the recognized user text only to the same authorized chat for correction, never in audit logs. Demo restart archives the existing safe operational logs under ignored `.local/runtime/archive/` before launching new processes; business/session state remains process-local.
-
-### `app/main.py`
-HTTP boundary:
-- app creation;
-- lifespan;
-- HTTPX/OpenAI clients;
-- webhook secret check;
-- allowlist/private-chat enforcement;
-- request body limits;
-- webhook receipt dedupe;
-- process-wide gate.
-
-### `app/config.py`
-Strict ENV configuration.
-
-Important current fact:
-```python
-mode: Literal["mock", "firstbit_readonly"] = "mock"
-```
-
-Both modes reject `ONEC_WRITE_ENABLED=true`. FirstBit credentials/config live in typed `FirstBitSettings`; ENV/SecretStr only.
-
-### `app/firstbit.py`
-GET-only real provider and minimal external Pydantic response models. Owns bounded HTTPS I/O, fresh consumed-schema checks, Company/Contract/Item/history/VAT/currency/UOM resolution and non-executable historical proposal mapping. Live prepare/refresh verified on one client; synthetic tests prove separate clients keep their own contract/history/amounts, independently of smoke ENV. Query spaces use RFC3986 `%20`; unsupported tolower and equality on unbounded DescriptionFull are avoided. Double wire values still undergo Decimal/domain validation, and Int64 string decoding is limited to LineNumber. No create/post/PDF transport exists. Exact objects/fields: `firstbit/READONLY_PIPELINE.md`.
-
-### `app/fake_onec.py`
-In-memory implementation of `OneC`.
-
-### `app/fake_data.py`
-Fake clients/services/tax/bank/etc fixtures.
-
-### `app/ai.py`, `app/language.py`, `app/intent.py`
-Controlled language interpretation and draft merge.
-
-### `app/voice.py`
-Voice validation + STT.
-
-### `app/telegram.py`, `app/telegram_models.py`
-Telegram I/O and typed response models.
-
-### `app/mock_pdf.py`
-Fake-only PDF renderer. Never reuse for production accounting PDF.
-
-### Local demo runtime scripts
-`scripts/run_local.py` loads private ENV and enforces real read-only / OpenAI / disabled writes before single-worker Uvicorn startup. `start_readonly_demo.py` manages only recorded owned Windows app/tunnel processes with hidden windows; `register_demo_webhook.py` validates local state, public app health and Telegram registration responses. Runtime state/logs stay under ignored `.local/runtime/`. No process architecture change or persistent financial storage is introduced. See `firstbit/LIVE_DEMO.md` for actual live status and billing blocker.
-
-## High-level current runtime
-
-The diagram below describes mock execution. In `firstbit_readonly`, provider reads produce a `HistoricalProposal` inside `InvoicePreview`; confirmation refreshes the proposal and stops with a verification acknowledgement. Execution/PDF are blocked. Real provider draft context is never forwarded to AI. Optional unresolved new-document fields are permitted only on this historical proposal; financial line arithmetic remains fully validated.
+## Dependency and data direction
 
 ```text
-POST /telegram/webhook
-        |
-        v
-secret + allowlist + private-chat validation
-        |
-        v
-receipt dedupe + process gate
-        |
-        v
-Bot.prepare()
-        |
-        +--> voice -> Telegram download -> STT
-        |
-        +--> CommandInterpreter / strict parser
-        |
-        v
-InvoiceService.prepare()
-        |
-        +--> OneC.resolve_client()
-        +--> OneC.resolve_service()
-        +--> OneC.resolve_basis()
-        |
-        v
-PreparedInvoice / InvoicePreview
-        |
-        v
-5-minute confirmation token
-        |
-        v
-InvoiceService.refresh()
-        |
-        +--> read_operation()
-        +--> resolve_basis() again if not_started
-        |
-        v
-InvoiceService.execute()
-        |
-        +--> read_operation()
-        +--> ensure_draft()
-        +--> ensure_posted()
-        +--> get_pdf()
-        |
-        v
-Telegram sendDocument
+Telegram webhook -> Bot -> parser/interpreter + local draft
+                           -> InvoiceService -> OneC Protocol
+                                                  +-> FakeOneC
+                                                  +-> FirstBit GET
+                           <- validated PreparedInvoice / clarification
+                 <- presentation + validated Telegram transport
 ```
 
-## Domain validation strategy
+The LLM cannot invoke provider methods. Real AI receives only original user input, empty provider-derived draft and boolean field availability; provider resolution and number/source binding are local. Monetary initial requests use `InitialInvoiceRequest`, other natural requests/edits `LanguageIntent`, narrow legacy period extraction `Extraction`; strict `parse_command` remains available without AI. Model output is grounded before it becomes `InvoiceCommand`. Mechanisms and transitions: [SYSTEM_MAP](SYSTEM_MAP.md).
 
-`StrictModel`:
-- `strict=True`;
-- `extra="forbid"`;
-- `frozen=True`;
-- `hide_input_in_errors=True`;
-- `revalidate_instances="always"`;
-- `allow_inf_nan=False`.
+Initial money requires a validated baseline, then locally bound source/LineNumber overrides and a second basis read. Multi-service history uses per-line provenance rather than a new engine or a larger BillingBasis schema. Preview changes are part of digest/revision. Exact financial behavior is owned by the two feature guides, not this architecture summary.
 
-`ExternalModel` permits extra provider fields but validates consumed fields.
+## State and identity
 
-Use same pattern for real OData response models:
-- validate external envelope;
-- transform to strict internal models;
-- never let raw provider dict leak deep into domain logic.
+`main.py` holds bounded webhook receipts and the process gate. Bot owns `pending`, `client_choices`, `service_choices`, `initial_quantities`, `supplier_reviews`, `contexts`, `last_contexts`, `recoveries`, `delivered` and `delivery_attempted`. FakeOneC holds fake documents. Unconfirmed state is in-memory; an optional confirmed-operation journal can restore frozen recoveries/delivery as described in PRODUCTION_OPERATION. SDK voice uses a temporary file removed in finally, not durable audio storage. Audit logs and deployment state files are operational evidence, not persistence for business operations.
 
-## Preview integrity
+`BillingBasis.key` represents provider-defined business identity. `PreparedInvoice.operation_id = sha256("invoice:v1:" + key)` intentionally excludes revision. Revision and preview digest detect snapshot changes, not duplicate operations across restarts. A returned Invoice must match client/basis and the confirmed preview digest. API/recovery obligations: [onec-contract](onec-contract.md).
 
-`InvoiceLine` recomputes:
-- subtotal;
-- tax;
-- total.
+Readonly proposal refresh re-reads basis and compares it. Writable/fake refresh reads operation state first, freezes already started operations, and re-resolves only a not-started basis. Execute rejects historical/manual/preview-only proposals unless the real candidate supplies an admitted ExecutionReview and explicit write capability/permission. Candidate admission and rollout are owned by PRODUCTION_OPERATION; production native PDF is not connected.
 
-`InvoicePreview` recomputes aggregate totals.
+`TaxInvoiceOneC` is an optional extension to the existing OneC protocol, not a second provider architecture. `InvoiceService` orchestrates linked generation/read-back/finalization and `OperationJournal` persists the relation and one-shot intents; Bot retains its existing delivery path. `TaxInvoiceReference` is a returned hint, `TaxInvoice` a verified provider result, and `TaxInvoicePdf` includes exact document/version/form provenance. The actual FirstBit native capability is not implemented or advertised; only synthetic providers currently exercise it. Contract and reliability obligations: [onec-contract](onec-contract.md), [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
-`InvoicePreview.digest` = SHA-256 of model JSON.
+## Concurrency and operational limits
 
-`Invoice.preview_digest` must equal confirmed preview digest.
+Webhook receipts have a hard capacity without eviction; gate contention returns 503. A receipt binds update ID to payload fingerprint, holds pending response/prepared state for delivery retry, and clears temporary payload fields after acknowledged handling. Default duplicate/delivery tracking is process-local; an enabled journal persists confirmed-operation delivery uncertainty as described in PRODUCTION_OPERATION. Exact bounds and verification: [SECURITY](SECURITY.md), [VERIFICATION](VERIFICATION.md).
 
-This is a key anti-mismatch guard and must survive real adapter integration.
-
-## Billing identity and operation identity
-
-Current:
-```text
-operation_id = SHA256("invoice:v1:" + BillingBasis.key)
-```
-
-Revision is intentionally excluded.
-
-Meaning:
-- changing price/quantity/tax/revision should not silently create a second operation for same business invoice identity;
-- `BillingBasis.key` must therefore represent business identity, not snapshot content.
-
-When designing real basis key, keep the semantics from `docs/onec-contract.md`.
-
-## Write flow
-
-`InvoiceService.execute()` does:
-
-```text
-read_operation
-if unknown -> STOP
-if not_started:
-    write_guard
-    ensure_draft
-if draft:
-    write_guard
-    ensure_posted
-get_pdf
-```
-
-If exception occurs after calling create/post:
-- state becomes unknown;
-- service does one `_read_state()` reconciliation;
-- it does not automatically re-run mutation in that call;
-- raises `WorkflowFailure` with reconciled state.
-
-## Pre-confirm refresh
-
-`InvoiceService.refresh()`:
-- calls `read_operation`;
-- if `unknown` -> recovery path;
-- if operation already started -> freezes existing prepared state;
-- if `not_started` -> resolves basis again;
-- basis key must stay unchanged;
-- changed snapshot leads to new preview and new confirmation.
-
-## Webhook boundary facts
-
-Current code:
-- FastAPI OpenAPI/docs disabled.
-- Header: `X-Telegram-Bot-Api-Secret-Token`.
-- HMAC constant-time comparison.
-- Body max 32 KiB.
-- Body read timeout 5 s.
-- Only numeric allowlisted user IDs.
-- Only private chat where `chat.id == sender.id`.
-- Bot actors, sender_chat and forwards rejected.
-- process-wide `asyncio.Lock`, acquire timeout 0.1 s.
-- max 10,000 receipt records, no eviction.
-- same `update_id` + changed payload -> HTTP 409.
-- max 3 delivery attempts per receipt.
-
-## HTTP client facts
-
-In `main.py`:
-- Telegram HTTPX timeout 10s, connect 3s;
-- AI HTTPX timeout 20s, connect 3s;
-- `follow_redirects=False`;
-- `trust_env=False`;
-- OpenAI SDK max_retries=0.
-
-## Bot process-local state
-
-`Bot` keeps:
-- `pending`;
-- `contexts`;
-- `last_contexts`;
-- `recoveries`;
-- `delivered`;
-- `delivery_attempted`.
-
-This is currently memory-only.
-
-Implications:
-- one-worker design;
-- restart loses workflow state;
-- production durable idempotency cannot rely on this memory.
-
-## Current config boundary
-
-`Settings` currently contains:
-- Telegram token/secret/allowlist;
-- `APP_MODE=mock`;
-- `ONEC_WRITE_ENABLED`;
-- fake fault injection;
-- OpenAI mode/key/model config.
-
-FirstBit ENV fields now exist in `FirstBitSettings`; see `firstbit/READONLY_PIPELINE.md`. Credentials are ENV/SecretStr only.
-
-Real adapter work should introduce typed SecretStr-backed settings without weakening existing mock guard.
-
-## Real FirstBit adapter direction
-
-Runtime recovery keeps the same one-worker architecture. The existing launcher distinguishes a created quick tunnel from API error URLs; stale foreign/reused PIDs are never stopped. FirstBit `_get` can repeat one fixed GET after transport timeout/error only, under existing request/service deadlines; validation/status errors remain single-attempt. Local patch normalization repairs identical duplicate fields and explicit display rename spans without model/provider IDs or a new write path. See `.agent/plans/runtime-recovery.md`.
-
-Client lookup now uses `app/company_names.py` over bounded fresh `CompanyName` pages from the existing adapter; `Company` details are read only for actual choices/selection. No persistent index or new service. `LanguageIntent.to_intent` can recover a missing client only from a verbatim explicitly delimited invoice phrase. Similarity/transliteration remains a button suggestion; IDs and provider data stay out of AI. See [company search](firstbit/COMPANY_SEARCH.md).
-
-Explicit user price/VAT/display-name revisions flow through typed `preview_overrides` in the existing draft/command/resolve_basis path. The model supplies spans; `app/numbers.py` supplies deterministic numbers, service binds source/line identity, provider verifies tax and computes totals. See [preview revisions](firstbit/PREVIEW_REVISIONS.md).
-
-Recommended ownership:
-```text
-app/onec/               # or another small provider boundary consistent with repo
-  models.py             # ExternalModel/Pydantic OData payloads
-  client.py             # GET-only typed HTTP layer first
-  adapter.py            # OneC Protocol implementation
-  mapping.py            # reviewed constants/object map if needed
-```
-
-Exact paths are not mandated; inspect current style first. Avoid adding unnecessary layers.
-
-Read-only v1 should implement:
-- `resolve_client`;
-- `resolve_service`;
-- `resolve_basis`;
-- safe provider errors.
-
-Keep `ensure_draft`, `ensure_posted`, `get_pdf` disabled/not implemented for real adapter until separate approval.
-
-## Confirmed OData resolution rules
-
-### Company
-`Catalog_Companies`:
-- ignore folder;
-- ignore deleted;
-- exact normalized Description/DescriptionFull first;
-- alias mapping may point to Ref;
-- fuzzy only proposes candidates;
-- persist Ref.
-
-### Contract
-`Catalog_CompanyContracts`:
-- prefer valid default ref;
-- validate owner;
-- validate active;
-- fallback to active owner contracts;
-- require unique fallback.
-
-### Bookkeeping service
-Confirmed production Item:
-`Accounting and bookkeeping services`.
-
-Do not treat ItemPrices as authoritative in this specific integration unless later evidence changes.
-
-### Historical invoice
-For Company+Contract:
-- `Document_InventoryExpense`;
-- posted;
-- not deleted;
-- newest first;
-- find first invoice containing bookkeeping Item;
-- preserve all matching rows.
-
-Historical values are proposal/preview input, not a forever tariff.
-
-## Important unresolved areas
-
-Before real write:
-- exact direct OData create semantics;
-- which UI defaults execute through Standard OData;
-- atomic uniqueness mechanism in 1C;
-- persistence of operation ID;
-- posting action semantics;
-- standard print form retrieval;
-- durable app-side recovery across restart;
-- multi-process concurrency.
-
-Do not mark these solved from metadata alone.
-
-## Security boundary
-
-Подробная модель угроз, least-privilege правила, FirstBit/OData exposure, data minimization, TLS/secret requirements и write-admission gate находятся в `docs/SECURITY.md`.
-
-Architecture changes that affect:
-- credentials;
-- FirstBit permissions;
-- OData surface;
-- data sent to OpenAI;
-- persistence;
-- network exposure;
-- write/retry/recovery
-
-must be reviewed against that document.
+Do not add workers, provider-side transactional uniqueness claims or a new invoice engine based only on old proposed architecture notes. Local confirmed-operation persistence exists; provider-side guarantees and actual real write/PDF verification remain milestones in [PROJECT_CONTEXT](PROJECT_CONTEXT.md).

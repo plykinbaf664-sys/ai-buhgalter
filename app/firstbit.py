@@ -38,7 +38,8 @@ class FirstBitSettings(StrictModel):
     base_url: str = Field(repr=False)
     username: SecretStr
     password: SecretStr
-    readonly_account: Literal[True]
+    readonly_account: bool
+    write_account: bool = False
     bookkeeping_item_id: UUID
     client_aliases: dict[str, UUID] = Field(default_factory=dict, repr=False)
     service_aliases: tuple[Label, ...] = ("Accounting and bookkeeping services",
@@ -60,7 +61,9 @@ class FirstBitSettings(StrictModel):
     @model_validator(mode="after")
     def dedicated_account(self):
         name = self.username.get_secret_value().strip()
-        if (not name or re.search(r"admin|админ|administrator|администратор", name, re.I)
+        if (not self.readonly_account and not self.write_account
+                or self.readonly_account and self.write_account
+                or not name or re.search(r"admin|админ|administrator|администратор", name, re.I)
                 or not self.password.get_secret_value().strip() or self.bookkeeping_item_id == ZERO
                 or any(ref == ZERO for ref in self.client_aliases.values())):
             raise ValueError("A dedicated read-only account and non-empty references are required")
@@ -69,14 +72,17 @@ class FirstBitSettings(StrictModel):
         return self
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, *, writable: bool = False):
+        if type(writable) is not bool:
+            raise ValueError('Account mode must be explicit boolean')
         # JSON is an intentional ENV serialization boundary; UUIDs remain typed.
         try:
             return cls.model_validate_json(json.dumps({
                 "base_url": os.environ.get("FIRSTBIT_BASE_URL", ""),
                 "username": os.environ.get("FIRSTBIT_USERNAME", ""),
                 "password": os.environ.get("FIRSTBIT_PASSWORD", ""),
-                "readonly_account": os.environ.get("FIRSTBIT_READONLY_ACCOUNT") == "true",
+                "readonly_account": not writable and os.environ.get("FIRSTBIT_READONLY_ACCOUNT") == "true",
+                "write_account": writable and os.environ.get("FIRSTBIT_INTEGRATION_ACCOUNT") == "true",
                 "bookkeeping_item_id": os.environ.get("FIRSTBIT_BOOKKEEPING_ITEM_ID", ""),
                 "client_aliases": json.loads(os.environ.get("FIRSTBIT_CLIENT_ALIASES", "{}")),
             }))
@@ -744,6 +750,14 @@ class FirstBit:
     async def read_operation(self, basis, operation_id):
         # No durable FirstBit operation correlation exists in this phase.
         return OperationState(operation_id=operation_id, status="unknown")
+
+    async def verify_write_schema(self, expected_sha256: str | None):
+        # Discovery/verification only: does not change preview_only or enable a
+        # mutation transport. A future writer must call this before mutation.
+        from app.firstbit_write_schema import inspect_write_schema
+        await self.check_metadata()
+        evidence = inspect_write_schema(await self._get("$metadata", metadata=True))
+        return evidence.require_approved(expected_sha256)
 
     async def ensure_draft(self, *args, **kwargs):
         raise WritesDisabled()

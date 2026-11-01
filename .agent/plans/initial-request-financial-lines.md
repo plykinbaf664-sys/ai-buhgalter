@@ -1,5 +1,7 @@
 # Explicit initial invoice parameters over historical proposals
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/INITIAL_REQUESTS.md](../../docs/firstbit/INITIAL_REQUESTS.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal
 Initial text/voice may specify client/date and multiple service lines with amounts/tax. Explicit grounded user values take precedence; omitted values come only from verified client-specific posted history. Preview remains editable, cancelable and non-executable.
 
@@ -15,11 +17,9 @@ At investigation start, preview edits supported net unit price, catalog-backed V
 ## Safety / scope
 No BillingBasis/storage/write architecture change is planned. OneC protocol methods remain; any new command/override fields must be typed and verified at the service/provider boundaries. Existing dedicated reader ENV/SecretStr, TLS, metadata guards, GET-only transport, supplier review, confirmation/cancellation/recovery remain. FirstBit names/IDs/money are never sent to the LLM; it selects spans from user input only. No production dumps/fixtures in Git, no mutations/PDF. Current accounting/tax applicability and controlled draft-write remain separate gates.
 
-## Investigation result / required input
+## Scope change established during investigation
 
-Fresh metadata-guarded GETs confirmed the second requested service as a real active service and found it in the requested client's posted history before the invoice date. The bounded service listing was incomplete at 200 records; it must not be used as an authoritative complete service index. Targeted historical item refs were resolved independently. There are 23 posted invoices in the bounded client/contract history for this date, but none contains both the configured bookkeeping item and the second service. Therefore the example cannot be honestly implemented as renaming/duplicating one bookkeeping source row. It requires independently verified per-service sources and per-line source/LineNumber binding, with consistent client/contract/currency/issuer and explicit handling of cross-source differences. This is a necessary provenance extension to the initial outline above; revise the domain/schema-impact section before implementation rather than hide the mismatch.
-
-At that investigation checkpoint, owner clarification was still pending; no runtime code/ENV had been changed or computation made under an assumed financial meaning. That checkpoint used production GET only, without Telegram delivery or external AI. The subsequent clarification and implementation are recorded below. Private service/history evidence: `.local/firstbit/initial-lines-service-evidence.json`.
+A combined request needed independently verified per-service historical sources rather than renaming/duplicating a bookkeeping row. The owner confirmed NET line amounts with VAT added separately. Private case data remains outside Git; the resulting generalized source/LineNumber binding and financial semantics are documented in INITIAL_REQUESTS.
 
 ## Approved interpretation and implementation design
 Owner clarified that explicit line amounts are NET, with VAT added separately. Initial per-service overrides will use the existing typed override mechanism with a distinct net line amount (never interpreted as unit price); source spans are decoded locally. Gross-inclusive instructions remain a clarification, not silently reinterpreted.
@@ -40,3 +40,7 @@ Commands actually run:
 - `.venv/Scripts/python.exe scripts/check_demo_ready.py --deep` after the final app reload: **READY** for local/public health, Telegram webhook queue, production metadata GET and grounded OpenAI patch; writes disabled.
 
 Private diagnostics remain under ignored `.local/firstbit/`. The owned app process was reloaded after final code changes, retaining the ngrok tunnel and `firstbit_readonly` mode. Old process-local buttons expire across restart; use a fresh request. There were real external OpenAI and Telegram calls as explicitly described, but every FirstBit call was GET and `ONEC_WRITE_ENABLED=false` remained enforced. Controlled draft-write, posting, production PDF, durable idempotency and unresolved accounting applicability remain separate work.
+
+## Completed implementation
+
+The typed initial-line, generic Service lookup/choice and multi-source historical-preview path is implemented. No real write/post/PDF was enabled. Later source/financial corrections and exact current verification scope belong to the linked feature/verification guides rather than this original implementation outline.

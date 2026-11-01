@@ -1,117 +1,26 @@
-# FirstBit Metadata Coverage Report
+# FirstBit private metadata coverage
 
-Voice name search reuses existing Catalog.Company name/ref/active fields; no new export or full bundle load. Runtime GET verified fixed paging (`$top/$skip`, Ref_Key ordering) and local name comparison. Name-only transient pages do not establish financial defaults. See [company search](COMPANY_SEARCH.md).
+## What this snapshot means
 
-Implementation and live-validation status: [READONLY_PIPELINE.md](READONLY_PIPELINE.md). Coverage describes the private configuration snapshot; the application checks consumed live schema at runtime. Live prepare/refresh passes on the reviewed cases after confirming Double numeric fields and Int64 string serialization. An additional historical/current-contract supplier mismatch uses the same Entity references, explicit user review and non-executable provenance; targeted bundle members and fresh GETs suffice, with no guessed provider fields. This does not prove all financial variants or write compatibility.
+The private configuration bundle is discovery evidence, not application configuration or a proof of current production publication. Original coverage review recorded: **1267 indexed objects, 38 detailed exports, 33 published MVP objects, 32/33 with detailed exports**, with empty not_found/error reports. These are snapshot counts, not an assertion that the live database still has that exact surface. Fresh metadata/GET outranks them.
 
-## Result
+Private location: `.local/firstbit/metadata/firstbit_metadata_bundle.json`; full index and selected detail members are inside that bundle. Do not load all of it for routine flow work. Runtime instead fetches fresh Standard OData metadata and verifies only the consumed contract; [READONLY_PIPELINE](READONLY_PIPELINE.md) owns the exact field table and schema bounds.
 
-The metadata bundle was validated against the current published MVP OData whitelist and the current read-only invoice-resolution flow.
+## Runtime versus research coverage
 
-- Full FirstBit configuration index: **1267 objects**
-- Detailed metadata exports: **38 objects**
-- Published MVP OData whitelist: **33 objects**
-- Published objects with full detailed metadata: **32 / 33**
-- Detail exports reported `not_found=[]` in every source export.
-- Detail exports reported no unresolved object errors.
+| Scope | Objects |
+|---|---|
+| Actually consumed by reader | Catalog.Companies, CompanyContracts, Entities, Items (including Code), Currencies, VATRates, UOMClassifier, UOM; Document.InventoryExpense and embedded Inventory |
+| Exported for investigation, not consumed in current preview | SalesPaymentTerms/Versions, BankAccounts, BaseUnits, IncomeItems; ItemPrices/ItemVATRates/VAT parameter and tax-registration registers; ItemsGLAccounts/CompaniesGLAccounts/DefaultGLAccounts and receivable payment-term versions; relevant enums |
+| Newly reviewed detail and fresh publication | Catalog.BusinessActivities, Catalog.ExpenseItems, Document.TaxInvoice, Enum.TransactionTypesTaxInvoice; ChartOfAccounts.GeneralChartOfAccounts detail reviewed |
+| Additional index-only future dependency | Catalog.Banks: detailed export/semantics not proven for this flow |
 
-## Only published object without full detail export
+Current consumed objects have detailed discovery coverage; live type checks and actual GET evidence remain necessary. The Code property was separately confirmed in metadata/GET. Full customer/catalog values are unnecessary for a coverage audit and must not enter docs/fixtures.
 
-```text
-ChartOfAccounts.GeneralChartOfAccounts
-```
+Bank/payment/GL investigation coverage **does not** prove current accounting defaults, SWIFT/bank semantics, tax applicability, authoritative current tariffs or new-document behavior. The readonly reader does not fetch these sources; the native writer consumes the reviewed subset documented in PRODUCTION_OPERATION, including effective supplier VAT registration. Historical GL/default references do not establish their current meaning. GeneralChartOfAccounts detail is now reviewed; live analytical-reference validation is still mandatory for write admission.
 
-This is **not a blocker for the current read-only Telegram → FirstBit → InvoicePreview milestone** because the current preview does not need to resolve GL account display metadata. Relevant GL references/default sources are already detailed.
+## Missing evidence procedure
 
-It **should be exported in detail before write-enablement if the write adapter needs to validate or resolve GL account semantics/names.**
+Identify the concrete missing field/object -> inspect the full private index -> inspect only its detail -> fresh readonly `$metadata`/GET -> obtain a targeted additional export if necessary -> update reviewed mapping/synthetic tests only when proven. If still unproven, record a blocker. Do not guess names, broaden publication automatically, or treat snapshot coverage as write admission.
 
-## Current read-only flow coverage
-
-- [x] `Catalog.Companies`
-- [x] `Catalog.CompanyContracts`
-- [x] `Catalog.Entities`
-- [x] `Catalog.Items`
-- [x] `Catalog.Currencies`
-- [x] `Catalog.VATRates`
-- [x] `Catalog.SalesPaymentTerms`
-- [x] `Catalog.SalesPaymentTermsVersions`
-- [x] `Catalog.BankAccounts`
-- [x] `Catalog.UOMClassifier`
-- [x] `Catalog.UOM`
-- [x] `Catalog.BaseUnits`
-- [x] `Catalog.IncomeItems`
-- [x] `InformationRegister.ItemPrices`
-- [x] `InformationRegister.ItemVATRates`
-- [x] `InformationRegister.VATRateParameters`
-- [x] `InformationRegister.VATTaxationParameters`
-- [x] `InformationRegister.EntityRegistrationsWithTaxAuthorityAsVATPayer`
-- [x] `InformationRegister.ItemsGLAccounts`
-- [x] `InformationRegister.CompaniesGLAccounts`
-- [x] `InformationRegister.DefaultGLAccounts`
-- [x] `InformationRegister.AccountsReceivablePaymentTermsVersions`
-- [x] `Enum.ItemTypes`
-- [x] `Enum.VATTaxationTypes`
-- [x] `Enum.TransactionTypesSalesInvoice`
-- [x] `Document.InventoryExpense`
-
-### Missing detailed metadata for current read-only flow
-
-None.
-
-## What this proves
-
-For the currently planned read-only pipeline, every metadata object identified as necessary for:
-
-- company resolution;
-- contract resolution;
-- service/item resolution;
-- historical invoice lookup;
-- VAT/currency/UOM support;
-- bank/payment-term support;
-- relevant GL/default-reference support;
-- creation of a real read-only preview
-
-has a detailed metadata export in the bundle.
-
-## What this does NOT prove
-
-The bundle is not a guarantee that no new object will ever be needed.
-
-A future requirement can reveal:
-- a FirstBit business rule stored in another object;
-- a new field exposed only through Standard OData `$metadata`;
-- a write/post/PDF dependency not needed by read-only resolution.
-
-If this happens, the correct behavior is:
-
-```text
-need new field/object
-→ check full index
-→ inspect fresh $metadata / GET
-→ export only the missing object's details if needed
-→ update mapping/tests/bundle
-→ continue
-```
-
-Do not guess.
-
-## Freshness rule
-
-This bundle is a snapshot. For exact OData implementation, fresh production `$metadata` and read-only runtime responses outrank this file.
-
-The adapter should fail closed if the live schema contradicts the reviewed mapping.
-
-## Readiness conclusion
-
-**Ready for implementation of the current production READ-ONLY pipeline.**
-
-**Not yet sufficient evidence to enable production writes.**
-
-Before write enablement, separately close:
-- detailed `GeneralChartOfAccounts` if required;
-- exact create semantics;
-- idempotency/uniqueness;
-- posting;
-- PDF retrieval;
-- durable restart recovery;
-- metadata drift guard.
+Provider findings are owned by [INTEGRATION_EVIDENCE](FIRSTBIT_INTEGRATION_EVIDENCE.md); remaining milestones by [PROJECT_CONTEXT](../PROJECT_CONTEXT.md). A consumed-field read guard exists now; the native write/schema/journal implementation and remaining production proof are owned by [PRODUCTION_OPERATION](PRODUCTION_OPERATION.md).

@@ -1,0 +1,8 @@
+abi <abi/4.0>,
+include <tunables/global>
+profile ai-buhgalteria-chromium-0 /srv/ai-buhgalteria/workspace/.local/browsers/chromium-1248/chrome-linux64/chrome flags=(unconfined) {
+  userns,
+}
+profile ai-buhgalteria-chromium-1 /srv/ai-buhgalteria/workspace/.local/browsers/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell flags=(unconfined) {
+  userns,
+}

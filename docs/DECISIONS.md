@@ -1,12 +1,16 @@
-# Engineering Decisions
+# Engineering decisions
 
-## Company voice matching is local; similarity only proposes
+Rationale only. Current mechanics live in the owning guides; completed incident plans are historical, not rules.
 
-Whole-phrase server search missed name variants; actual synthetic speech also exposed a missing model client despite correct STT. Read only fresh bounded name fields (200/page, max 5000), match locally without data to AI or disk, recover only verbatim explicit user company phrases, and require choice for approximate/transliterated matches. Only a unique canonical exact name ignoring case/spacing/punctuation may auto-resolve; incomplete discovery cannot justify it. Re-read choices/selection by stable UUID. Live server case probes were insensitive, so do not claim a proven case-sensitive production server. See [company search](firstbit/COMPANY_SEARCH.md).
+## D25 — Native UI actions with OData accounting authority
 
-## Explicit preview revisions remain user proposals
+Use the existing OneC provider/service/journal for the requested full production path. Native Generate and print commands can be automated by a dedicated VPS Playwright browser when no supported external method has been established. This uses standard navigation and observed form controls, not copied web-session RPC/module/version/temp URLs. OData remains authoritative for document existence, relationships, content and Posted state; an observed auto-posted TaxInvoice is not a universal rule.
 
-The owner authorized price/VAT/display-name corrections. Keep them separate from historical facts as typed `preview_overrides`, decoded from current-message spans without model-generated amounts/IDs. Bind to existing source/LineNumber locally, verify original history first, verify actual tax profiles and recompute Decimal totals. Preserve service identity and repeated rows; show manual provenance. All manual proposals remain non-executable even in fake; write admission requires a later contract. See [preview revisions](firstbit/PREVIEW_REVISIONS.md) and [ExecPlan](../.agent/plans/preview-price-tax-description.md).
+Separate retries by side effect: bounded read-only navigation or printing can reconnect; financial clicks stay one-shot behind durable claims. Actual rollout/admission belongs to [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md), not this rationale.
+
+## D24 — Native print evidence is not an external API contract
+
+Keep the requested linked TaxInvoice flow in the existing OneC/service/journal/Bot architecture. Persist the second document's identity and uncertainty before adding a real native transport; require same-document/form provenance for its PDF. HAR can prove native behavior without proving a supported callable API, universal posting or transaction guarantees. Do not turn captured web-session RPC into the production integration or invent module owners/signatures. Obtain targeted configuration/publication evidence and use a narrow native handler only if needed. Actual provider facts: [INTEGRATION_EVIDENCE](firstbit/FIRSTBIT_INTEGRATION_EVIDENCE.md); admission: [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
 ## D1 — Preserve the existing `OneC` Protocol boundary
 
@@ -27,12 +31,10 @@ Only if a real integration cannot satisfy the contract without a deliberate doma
 Production integration discovery suggested a richer basis object, but current code defines only `key`, `client_id`, `revision`, `preview`.
 
 ### Decision
-Do not document proposed fields as already implemented. If real adapter needs company/contract/source invoice refs, either:
-- encode provider-private data outside public domain safely; or
-- deliberately extend `BillingBasis` and update all usages/tests.
+Do not document proposed fields as already implemented. Current source/contract/entity provenance lives in typed HistoricalProposal and per-line source fields in the preview; BillingBasis itself was not expanded. Future schema changes must update all usages/tests.
 
 ### Revisit when
-During real adapter implementation.
+When a future provider/storage contract actually needs different public fields.
 
 ---
 
@@ -138,7 +140,7 @@ Business supplies an explicit aggregation rule.
 FirstBit OData uses all-zero GUID for empty references.
 
 ### Decision
-Normalize at provider boundary.
+Treat ZERO as an empty reference only according to the consumed field semantics. Empty default contract can trigger fallback; required linked references fail in _record. Do not turn arbitrary missing accounting refs into guessed defaults.
 
 ### Revisit when
 A specific property is documented otherwise.
@@ -151,7 +153,7 @@ A specific property is documented otherwise.
 `ContractByDefault_Key` exists, but ownership/active state must be checked.
 
 ### Decision
-Validate default; otherwise fallback to unique active contract by owner.
+Validate the default record and its owner/active state. Empty default or an inactive valid record permits unique active-owner fallback. Missing/deleted default or wrong owner blocks rather than silently replacing it.
 
 ### Revisit when
 FirstBit exposes a stronger official resolver.
@@ -233,8 +235,16 @@ Private configuration metadata supports mapping discovery. Credentials were subs
 
 ## D20 — Duplicate and partial client names require explicit choice
 
-Live owner voice reached resolution and exposed duplicate active Company records with identical names. Do not choose the first record or prefer one by historical price/availability. Return bounded typed candidates, display them only in the authorized chat and accept an expiring per-user token/index callback. Re-read original query candidates and verify the chosen ID remains active/in scope. Keep the selection only in local draft context, never a global alias or LLM context. No posted bookkeeping history remains a preview blocker after client selection. See `.agent/plans/client-choice-readonly.md` and `tests/test_client_choice.py`.
+Live owner voice reached resolution and exposed duplicate active Company records with identical names. Do not choose the first record or prefer one by historical price/availability. Return bounded typed candidates, display them only in the authorized chat and accept an expiring per-user token/index callback. Re-read original query candidates and verify the chosen ID remains active/in scope. Keep the selection only in local draft context, never a global alias or LLM context. Missing the requested service history remains a preview blocker after client selection. Current behavior: [company search](firstbit/COMPANY_SEARCH.md), `tests/test_client_choice.py`.
 
 ## D21 — Historical issuer conflict needs explicit review, never a silent default
 
 Live GET proved a client whose posted bookkeeping source uses a different legal entity from the current contract, while company/contract/currency and financial arithmetic agree. Targeted metadata proves both Entity references but does not prove that one may override the other for a new document. Resolve both entities and carry current-contract identity/name in typed historical provenance. Bot withholds the historical preview behind an explicit expiring source-review button, refreshing before acceptance. An accepted review is scoped to client+contract+both entity IDs; drift of financial identity blocks, price/revision drift requires renewed review. Display the historical supplier and unresolved new-document supplier clearly; no mutation/PDF is possible even after review/confirmation. Unknown/deleted entity, currency mismatch and inconsistent money still fail closed. No new entity metadata fields were assumed.
+
+## D22 — Explicit user financial values require a verified baseline
+
+Initial net amounts/services and later corrections are typed user proposals, not model-generated accounting defaults. Reuse prepare/resolve_basis and per-line source provenance rather than a second invoice engine. Multi-service sources may differ but must satisfy the verified client/contract/issuer/currency constraints. Detailed policy: [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md), [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md). Revisit only through a separately reviewed write contract.
+
+## D23 — Supervised hosting does not imply durable financial state
+
+Deploy a dedicated non-root, single-worker readonly service with independent dependencies and protected ENV/HTTPS/logs. Do not scale workers or claim restart-safe idempotency from systemd restarts. Keep rollback scoped to this project and preserve shared routes/services. Operations: [SERVER_DEPLOYMENT](SERVER_DEPLOYMENT.md). Revisit concurrency only after durable coordination and recovery exist.

@@ -32,24 +32,17 @@ tmp/
 temp/
 artifacts/
 
-# Local secrets
-.env
-.env.*
-!.env.example
-.local/firstbit/
-
-# Python local files
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Local/dev files
-*.log
-.DS_Store
-.idea/
-.vscode/
+# Private durable invoice state / PDF cache (including SQLite sidecars)
+*.har
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

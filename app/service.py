@@ -8,7 +8,8 @@ from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCan
                         OperationState, PdfDocument, PreparedInvoice, ResolvedClient,
                         ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection, ResolvedPreviewLineOverride,
                         ServiceProblem, ServiceChoiceRequired, InitialQuantityRequired, StaleBasis, StrictModel, UserProblem,
-                        WorkflowFailure, WritesDisabled)
+                        WorkflowFailure, WritesDisabled, TaxInvoice, TaxInvoiceReference, TaxInvoicePdf, TaxOperationState)
+from app.operations import MutationUncertain, OperationJournal
 
 logger = logging.getLogger("invoices")
 
@@ -39,23 +40,35 @@ def safe_backend_error(exc: Exception) -> str:
     # Only exact adapter-owned codes. Never log arbitrary exception strings.
     if isinstance(exc, BackendFailure) and len(exc.args) == 1 and isinstance(exc.args[0], str):
         code = exc.args[0]
-        if re.fullmatch(r"firstbit_(?:schema_mismatch|get_failed(?:_(?:timeout|http_error|http_[1-5][0-9]{2}|response_too_large|invalid_response))?)", code):
+        if re.fullmatch(r"firstbit_(?:schema_mismatch|write_schema_mismatch|create_uncertain|create_readback_mismatch|get_failed(?:_(?:timeout|http_error|http_[1-5][0-9]{2}|response_too_large|invalid_response))?)", code):
             return code
     return type(exc).__name__
 
 
 class InvoiceService:
-    def __init__(self, onec: OneC, timeout: float = 5, *, allow_real_writes: bool = False):
+    def __init__(self, onec: OneC, timeout: float = 5, *, allow_real_writes: bool = False,
+                 journal: OperationJournal | None = None):
         if type(allow_real_writes) is not bool:
             raise ValueError("Write permission must be explicit boolean")
         self.onec, self.timeout = onec, timeout
         self.allow_real_writes = allow_real_writes
+        self.journal = journal
 
     def _write_guard(self):
-        if getattr(self.onec, "preview_only", False) is True:
+        if (getattr(self.onec, "preview_only", False) is True
+                and getattr(self.onec, "write_capable", False) is not True):
             raise WritesDisabled()
-        if getattr(self.onec, "is_fake", False) is not True and not self.allow_real_writes:
+        if (getattr(self.onec, "is_fake", False) is not True
+                and (not self.allow_real_writes or self.journal is None)):
             raise WritesDisabled()
+
+    def readonly_preview(self, prepared: PreparedInvoice) -> bool:
+        if (getattr(self.onec, "write_capable", False) is True and self.allow_real_writes
+                and self.journal is not None and prepared.preview.execution_review is not None
+                and self.onec.is_fake is False):
+            return False
+        return (getattr(self.onec, "preview_only", False) is True
+                or bool(prepared.preview.user_overrides) or prepared.preview.historical_proposal is not None)
 
     async def prepare(self, command: InvoiceCommand, request_id: str, user_id: int, *,
                       existing: PreparedInvoice | None = None,
@@ -199,7 +212,7 @@ class InvoiceService:
         prepared = PreparedInvoice.model_validate(prepared)
         stage, known_state = "reconcile", "unknown"
         try:
-            if getattr(self.onec, "preview_only", False) is True or prepared.preview.user_overrides:
+            if self.readonly_preview(prepared):
                 # Verify a proposal, without claiming authoritative operation reconciliation.
                 stage = "refresh"
                 basis = BillingBasis.model_validate(await asyncio.wait_for(
@@ -248,14 +261,136 @@ class InvoiceService:
             self._check_invoice(state.invoice, prepared)
         return state
 
+    @staticmethod
+    def _check_tax_invoice(tax: TaxInvoice, prepared: PreparedInvoice, source: Invoice) -> TaxInvoice:
+        tax = TaxInvoice.model_validate(tax)
+        if (tax.source_document_id != source.document_id or tax.client_id != prepared.request.client_id
+                or tax.basis_key != prepared.basis.key or tax.preview_digest != prepared.preview.digest):
+            raise InvoiceConflict()
+        return tax
+
+    async def _read_tax_state(self, prepared: PreparedInvoice, source: Invoice) -> TaxOperationState:
+        state = TaxOperationState.model_validate(await asyncio.wait_for(
+            self.onec.read_tax_operation(prepared.basis, source, prepared.operation_id), self.timeout))
+        if state.operation_id != prepared.operation_id or state.source_document_id != source.document_id:
+            raise InvoiceConflict()
+        if state.invoice is not None:
+            self._check_tax_invoice(state.invoice, prepared, source)
+        return state
+
+    async def _execute_tax(self, prepared: PreparedInvoice, source: Invoice,
+                           request_id: str, user_id: int) -> InvoiceResult:
+        operation_id = prepared.operation_id
+        stage, known_state = 'tax_reconcile', 'unknown'
+        try:
+            if self.journal is None or not source.posted:
+                raise WritesDisabled()
+            state = await self._read_tax_state(prepared, source)
+            known_state = state.status
+            if state.status == 'unknown':
+                raise WorkflowFailure(stage, source.document_id, operation_id)
+            tax = state.invoice
+            if tax is not None:
+                self.journal.observe_tax(operation_id, tax)
+            if state.status == 'not_started':
+                stage = 'tax_generate'
+                self._write_guard()
+                self.journal.claim_tax_generation(operation_id)
+                event(request_id=request_id, user_id=user_id, stage=stage, status='started',
+                      operation_id=operation_id, document_id=source.document_id)
+                reference = TaxInvoiceReference.model_validate(await asyncio.wait_for(
+                    self.onec.ensure_tax_invoice(prepared.basis, source, operation_id), self.timeout))
+                if reference.source_document_id != source.document_id:
+                    raise InvoiceConflict()
+                self.journal.record_tax_reference(operation_id, reference)
+                # A returned reference is only a hint; the linked document needs read-back.
+                state = await self._read_tax_state(prepared, source)
+                if state.invoice is None or state.invoice.document_id != reference.document_id:
+                    raise InvoiceConflict()
+                tax, known_state = state.invoice, state.status
+                self.journal.observe_tax(operation_id, tax)
+            if not tax.posted:
+                stage = 'tax_post'
+                self._write_guard()
+                self.journal.claim_tax_post(operation_id)
+                event(request_id=request_id, user_id=user_id, stage=stage, status='started',
+                      operation_id=operation_id, document_id=tax.document_id)
+                reference = TaxInvoiceReference.model_validate(await asyncio.wait_for(
+                    self.onec.ensure_tax_posted(prepared.basis, tax, operation_id), self.timeout))
+                if reference.document_id != tax.document_id or reference.source_document_id != source.document_id:
+                    raise InvoiceConflict()
+                state = await self._read_tax_state(prepared, source)
+                if state.invoice is None or not state.invoice.posted or state.invoice.document_id != tax.document_id:
+                    raise InvoiceConflict()
+                tax, known_state = state.invoice, state.status
+                self.journal.observe_tax(operation_id, tax)
+            # Native generation may update the source's link/version. Verify both documents.
+            stage = 'tax_refresh'
+            refreshed_source = await self._read_state(prepared)
+            if refreshed_source.invoice is None or not refreshed_source.invoice.posted or refreshed_source.invoice.document_id != source.document_id:
+                raise InvoiceConflict()
+            source = refreshed_source.invoice
+            self.journal.observe(operation_id, source)
+            cached = self.journal.get(operation_id)
+            pdf = cached.pdf
+            if pdf is not None and not isinstance(pdf, TaxInvoicePdf):
+                raise InvoiceConflict()
+            if pdf is None:
+                stage = 'tax_pdf'
+                pdf = TaxInvoicePdf.model_validate(await asyncio.wait_for(self.onec.get_tax_invoice_pdf(tax), self.timeout))
+                # Check exact native form, parent, tax document and version before caching/delivery.
+                InvoiceResult(invoice=source, tax_invoice=tax, pdf=pdf)
+                after_print = await self._read_tax_state(prepared, source)
+                if after_print.invoice != tax or after_print.status != 'posted':
+                    raise InvoiceConflict()
+                source_after_print = await self._read_state(prepared)
+                if (source_after_print.invoice is None or not source_after_print.invoice.posted
+                        or source_after_print.invoice.document_id != source.document_id):
+                    raise InvoiceConflict()
+                source = source_after_print.invoice
+                self.journal.observe(operation_id, source)
+                self.journal.cache_tax_pdf(operation_id, source, tax, pdf)
+            event(request_id=request_id, user_id=user_id, stage='tax_pdf', status='success',
+                  operation_id=operation_id, document_id=tax.document_id)
+            return InvoiceResult(invoice=source, tax_invoice=tax, pdf=pdf)
+        except WorkflowFailure:
+            raise
+        except MutationUncertain:
+            raise WorkflowFailure('tax_reconcile', source.document_id, operation_id, 'unknown') from None
+        except WritesDisabled:
+            raise WorkflowFailure('write_disabled', source.document_id, operation_id, known_state) from None
+        except Exception as exc:
+            if stage in ('tax_generate', 'tax_post'):
+                known_state = 'unknown'
+                try:
+                    recovered = await self._read_tax_state(prepared, source)
+                    if recovered.invoice is not None:
+                        self.journal.observe_tax(operation_id, recovered.invoice)
+                        known_state = recovered.status
+                    # Absence after intent does not prove there is no in-flight generation.
+                except Exception:
+                    known_state = 'unknown'
+            event(request_id=request_id, user_id=user_id, stage=stage, status=known_state,
+                  operation_id=operation_id, document_id=source.document_id, error=safe_backend_error(exc))
+            raise WorkflowFailure(stage, source.document_id, operation_id, known_state) from None
+
     async def execute(self, prepared: PreparedInvoice, request_id: str, user_id: int) -> InvoiceResult:
         prepared = PreparedInvoice.model_validate(prepared)
         stage, document_id, known_state = "reconcile", None, "unknown"
         operation_id = prepared.operation_id
         try:
-            if (prepared.preview.historical_proposal is not None or prepared.preview.user_overrides
-                    or getattr(self.onec, "preview_only", False) is True):
+            if self.readonly_preview(prepared):
                 raise WorkflowFailure("write_disabled", None, operation_id, "not_started")
+            if getattr(self.onec, 'requires_tax_invoice', False) is True:
+                hooks = ('read_tax_operation', 'ensure_tax_invoice', 'ensure_tax_posted', 'get_tax_invoice_pdf')
+                if (self.journal is None or getattr(self.onec, 'native_pdf_available', True) is False
+                        or getattr(self.onec, 'posting_enabled', True) is False
+                        or any(not callable(getattr(self.onec, name, None)) for name in hooks)):
+                    raise WritesDisabled()
+            if self.journal is not None:
+                # This path is entered only after confirmation. Persist the exact
+                # frozen request before any possible external mutation.
+                self.journal.reserve(prepared, user_id)
             state = await self._read_state(prepared)
             known_state = state.status
             event(request_id=request_id, user_id=user_id, stage=stage, status=known_state,
@@ -263,17 +398,29 @@ class InvoiceService:
             if known_state == "unknown":
                 raise WorkflowFailure(stage, None, operation_id)
             invoice = state.invoice
+            if self.journal is not None and invoice is not None:
+                self.journal.observe(operation_id, invoice)
             if known_state == "not_started":
                 stage = "create"
                 self._write_guard()
+                if self.journal is not None:
+                    self.journal.claim_mutation(operation_id, "create")
                 event(request_id=request_id, user_id=user_id, stage=stage, status="started", operation_id=operation_id)
                 invoice = self._check_invoice(await asyncio.wait_for(
                     self.onec.ensure_draft(prepared.basis, operation_id), self.timeout), prepared)
+                if self.journal is not None:
+                    self.journal.observe(operation_id, invoice)
             document_id = invoice.document_id
             known_state = "posted" if invoice.posted else "draft"
+            if not invoice.posted and getattr(self.onec, "posting_enabled", True) is False:
+                event(request_id=request_id, user_id=user_id, stage="create", status="verified_draft_posting_blocked",
+                      operation_id=operation_id, document_id=document_id)
+                return InvoiceResult(invoice=invoice)
             if not invoice.posted:
                 stage = "post"
                 self._write_guard()
+                if self.journal is not None:
+                    self.journal.claim_mutation(operation_id, "post")
                 event(request_id=request_id, user_id=user_id, stage=stage, status="started",
                       operation_id=operation_id, document_id=document_id)
                 posted = self._check_invoice(await asyncio.wait_for(
@@ -281,13 +428,30 @@ class InvoiceService:
                 if not posted.posted or posted.document_id != document_id:
                     raise ValueError("Invalid posting result")
                 invoice, known_state = posted, "posted"
+                if self.journal is not None:
+                    self.journal.observe(operation_id, invoice)
+            if getattr(self.onec, 'requires_tax_invoice', False) is True:
+                return await self._execute_tax(prepared, invoice, request_id, user_id)
             stage = "pdf"
-            pdf = PdfDocument.model_validate(await asyncio.wait_for(self.onec.get_pdf(invoice), self.timeout))
+            if getattr(self.onec, "native_pdf_available", True) is False:
+                event(request_id=request_id, user_id=user_id, stage="post", status="success_pdf_unavailable",
+                      operation_id=operation_id, document_id=document_id)
+                return InvoiceResult(invoice=invoice)
+            cached = self.journal.get(operation_id) if self.journal is not None else None
+            pdf = cached.pdf if cached is not None else None
+            if pdf is None:
+                pdf = PdfDocument.model_validate(await asyncio.wait_for(self.onec.get_pdf(invoice), self.timeout))
+                if self.journal is not None:
+                    self.journal.cache_pdf(operation_id, invoice, pdf)
             event(request_id=request_id, user_id=user_id, stage=stage, status="success",
                   operation_id=operation_id, document_id=document_id)
             return InvoiceResult(invoice=invoice, pdf=pdf)
         except WorkflowFailure:
             raise
+        except MutationUncertain:
+            # A persisted intent may still be in flight. Even a transient absent
+            # remote result does not permit another create/post request.
+            raise WorkflowFailure("reconcile", document_id, operation_id, "unknown") from None
         except WritesDisabled:
             raise WorkflowFailure("write_disabled", document_id, operation_id, known_state) from None
         except Exception as exc:
@@ -300,6 +464,8 @@ class InvoiceService:
                     if (document_id is not None and recovered.invoice is not None
                             and recovered.invoice.document_id != document_id):
                         raise ValueError("Reconciliation changed document identity")
+                    if self.journal is not None and recovered.invoice is not None:
+                        self.journal.observe(operation_id, recovered.invoice)
                     known_state = recovered.status
                     if recovered.invoice is not None:
                         document_id = recovered.invoice.document_id

@@ -72,11 +72,11 @@ def stop_owned(state: State, *, roles=('app', 'tunnel')):
         if not rows:
             continue
         process = rows[0]
-        cmd = (process.CommandLine or "").casefold()
+        cmd = (process.CommandLine or "").casefold().replace('/', '\\')
         tunnel_binary = ROOT / '.local/tools/ngrok.exe' if state.tunnel_provider == 'ngrok' else TUNNEL
         tunnel_name = 'ngrok.exe' if state.tunnel_provider == 'ngrok' else 'cloudflared.exe'
-        owned = (str(ROOT).casefold() in cmd and
-                 (role == "app" and process.Name == "python.exe" and str(PYTHON).casefold() in cmd and "run_local.py" in cmd or
+        owned = (str(ROOT).casefold().replace('/', '\\') in cmd and
+                 (role == "app" and process.Name == "python.exe" and str(PYTHON).casefold().replace('/', '\\') in cmd and "run_local.py" in cmd or
                   role == "tunnel" and process.Name == tunnel_name and str(tunnel_binary).casefold().replace('/', '\\') in cmd))
         if not owned:
             raise ValueError("Refusing to stop an unrelated process")

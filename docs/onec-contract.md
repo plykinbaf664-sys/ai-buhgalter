@@ -1,13 +1,22 @@
 # Контракт интеграции 1С
 
+## Optional linked TaxInvoice capability
+
+`app/domain.py:TaxInvoiceOneC` extends OneC without changing the existing fake/readonly requirements. These are adapter obligations, **not discovered HTTP endpoints**. A provider advertising `requires_tax_invoice=True` must implement authoritative `read_tax_operation`, one-shot `ensure_tax_invoice`, conditional `ensure_tax_posted`, and native `get_tax_invoice_pdf`, with a durable journal available before any source mutation. Missing capability fails before source creation.
+
+`TaxInvoiceReference` is an unverified returned hint. `TaxInvoice` binds the actual linked document to the source/client/basis/confirmed digest and its current posted state/revision. The adapter must verify the actual financial contents, issuer and relation against the confirmed preview; merely returning matching IDs/digest is insufficient. Duplicate/ambiguous linkage is unknown/conflict, never permission to select one. Read-back after generation decides whether posting is needed. Lost outcomes must reconcile before further mutation; an absent result after durable intent does not authorize resending generation.
+
+`TaxInvoicePdf` carries exact source/tax references, tax revision, fixed print manager/template provenance; service rechecks both documents before caching. The provider must obtain native bytes from the proved print pipeline, never use the source Invoice print form or mock rendering. Real FirstBit implementation/activation remains blocked pending supported external native contracts; provider facts and current status live in [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
+
 Это требования к адаптеру `app/domain.py:OneC`, **не описание существующих endpoints**.
-Реализован GET-only `app/firstbit.py` (`APP_MODE=firstbit_readonly`), включённого режима реальной записи нет. Live GET prepare/refresh smoke проходит на одном клиенте; выбор клиента приложения не ограничен smoke ENV.
-`ONEC_WRITE_ENABLED=false` используется по умолчанию; для настоящего адаптера
-запись потребуется включить явно после проверки прав, revision и восстановления.
+Реализован GET-only `app/firstbit.py` (`APP_MODE=firstbit_readonly`); controlled-create расширение `app/firstbit_write.py` описано в [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md). Опциональный native provider app/firstbit_production.py довёл контрольную операцию до проведения, связанного TaxInvoice и штатного PDF с восстановлением; результаты принадлежат VERIFICATION. Область live prepare/refresh и multi-service/voice/Telegram проверок — [VERIFICATION](VERIFICATION.md). Smoke ENV не ограничивает клиентов приложения.
+`ONEC_WRITE_ENABLED=true` невалиден в mock/readonly. Сам reader не становится writable от флага; режим controlled-create требует отдельного допуска.
+
+Сервис требует durable journal для любой non-fake mutation. `InvoiceResult.pdf=None` допускается только как явный результат остановки на проверенном черновике либо отсутствия штатного PDF; это не утверждение о проведении/доставке. Политика допуска и ограничения не дублируются здесь: [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
 | Метод | Вход → выход (Pydantic) | Обязательная гарантия |
 |---|---|---|
-| `resolve_client` | имя/описание пользователя, optional internal `selected_id` → `ResolvedClient` | Только чтение; единственное точное совпадение или `ClientChoiceRequired(ClientCandidates)`. Явный выбор повторно проверяется по свежим активным кандидатам исходного запроса |
+| `resolve_client` | имя/описание пользователя, optional internal `selected_id` → `ResolvedClient` | Только чтение; единственная проверенная identity (exact/reviewed alias) или `ClientChoiceRequired(ClientCandidates)`. Явный выбор повторно проверяется по свежим активным кандидатам исходного запроса |
 | `resolve_service` | `client_id`, название услуги, optional internal `selected_id` → `ResolvedService` | Только чтение; один допустимый стабильный ID услуги или typed ServiceChoiceRequired; выбранный ID проверяется по исходному запросу |
 | `resolve_basis` | `ResolvedInvoiceCommand` → `BillingBasis` с `InvoicePreview` | Только чтение; стабильные ID, revision и полный типизированный snapshot дат/реквизитов/строк/цен/налогов/итогов |
 | `read_operation` | `BillingBasis`, operation ID → `OperationState` | Авторитетное чтение перед записью; `unknown` нельзя трактовать как `not_started` |
@@ -16,9 +25,8 @@
 | `get_pdf` | `Invoice` → `PdfDocument` | Только штатная печатная форма 1С для существующего проведённого документа |
 
 Пользовательские названия используются только в read-only поиске клиента/услуг.
-FirstBit read transport допускает один дополнительный идентичный GET при сетевом transport error/timeout; HTTP status/auth и schema/financial validation не повторяются. Это не разрешает повтор mutation и не заменяет read-only reconcile после uncertain create/post. Все write guards сохранены.
-FirstBit company search выполняется локально по свежим ограниченным name-only страницам (200, максимум 5000, fixed skip/order/filter). Единственный exact key игнорирует регистр, пробелы и пунктуацию; транслитерация/произнесённые буквы/опечатки/частичные имена всегда требуют кнопки (до 5 похожих вариантов). Неполная выборка не даёт права выбирать автоматически. После выбора полная активная запись перечитывается и проверяется по исходному запросу; raw text не входит в company OData. Дословный fallback фразы «счёт для …» разрешает пропуск имени моделью, не придумывает имя/ID. [Правила поиска](firstbit/COMPANY_SEARCH.md).
-Неоднозначные/частичные результаты поиска FirstBit возвращаются как typed `ClientCandidates` (1–19 уникальных записей), а не выбираются автоматически. Bot хранит исходный `InvoiceCommand`, случайный token, кандидатов и срок 5 минут отдельно для каждого пользователя. Callback передаёт только token и номер; `selected_id` извлекается из сохранённого кандидата, не из текста или LLM. Выбор не подтверждает цену/договор и не разрешает запись. Новый текст/voice, отмена и restart отзывают кнопки; повторная доставка использует существующий receipt. Кандидаты и FirstBit IDs не отправляются в AI.
+Transport/schema bounds and actual consumed mapping: [READONLY_PIPELINE](firstbit/READONLY_PIPELINE.md). Company discovery/choice: [COMPANY_SEARCH](firstbit/COMPANY_SEARCH.md); generic Service choice and per-line historical composition: [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md). The Protocol supports typed ClientChoiceRequired/ServiceChoiceRequired; selection authorizes only continuing reads. Returned IDs must match the explicit internal selection.
+
 После успешного поиска `PreparedInvoice.request` содержит стабильные ID и количества,
 `BillingBasis` — ключ, revision и проверенный preview. Изменяющие методы получают
 только это основание и operation ID; поиск по свободному тексту при recovery запрещён.
@@ -33,17 +41,14 @@ FirstBit company search выполняется локально по свежи�
 Preview включает также `supply_date`, валюту, реквизиты сторон, банк/условия, 1–20 строк
 со стабильными ID услуг, количеством, UOM, ценой, типизированным налоговым профилем и
 готовыми итогами, а также общие итоги и сумму прописью. Налоговый профиль — ID, название,
-режим (`standard`, `zero_rated`, `exempt`, `outside_scope`) и ставка; ставка не выводится
-из пользовательской фразы. Явный налоговый режим проверяется против разрешённых данных.
+режим (`standard`, `zero_rated`, `exempt`, `outside_scope`) и ставка. Число явно запрошенной ставки декодируется из пользовательских слов локально; существование/тип профиля проверяются по provider данным, не выдумываются моделью.
 Предыдущий счёт может дать ID/количества/структуру и налоговую подсказку, но цены и
 допустимость профиля проверяются заново. Неоднозначность требует уточнения, до записи.
 
 Это правило текущих цен относится к fake; для FirstBit bookkeeping authoritative `ItemPrices` не доказан. Production read-only возвращает явно маркированное historical proposal: цены, отдельные строки и VAT предыдущего posted invoice проверяются арифметически и требуют проверки человеком. Они не объявляются текущим тарифом. Неподдерживаемая арифметика/неизвестные суммы блокируются. `HistoricalProposal` хранит source/contract/entity provenance внутри preview; `BillingBasis` не расширен. Поля supply date/bank/terms/contacts/amount in words могут быть `None` только в таком неисполняемом proposal: defaults нового документа не угадываются. `InvoiceService.execute()` блокирует historical proposals независимо от write permission. Подробный mapping и ограничения: `firstbit/READONLY_PIPELINE.md`.
-Отсутствующие услуги можно получить из подтверждённых настроек 1С без вопроса пользователю.
-Если Entity исторического источника отличается от Entity текущего договора, оба Entity должны независимо разрешиться GET. `HistoricalProposal.contract_entity_id/contract_entity_name` парно фиксируют различие; issuer preview берётся только из доказанного posted source. Bot сначала показывает две организации и кнопку просмотра исторического образца, затем делает fresh refresh перед принятием выбора. Выбор относится только к историческому предложению, не подтверждает организацию нового документа и не снимает блокировку записи. Несовпадение валюты, неизвестный/удалённый Entity, scope drift или некорректные суммы по-прежнему останавливают flow. IDs и исторические данные не передаются в LLM; для коротких правок допустимы только boolean-признаки заполненности локального draft.
-Необязательный период услуги также можно получить из подтверждённых данных 1С;
-он отражается в preview и сохраняется при дальнейших правках. Явно запрошенный
-пользователем период адаптер не может заменять другим.
+Без явного списка услуг FirstBit использует только проверенную историческую структуру по правилам INITIAL_REQUESTS; произвольные настройки/defaults не угадываются.
+Исторический supplier review и readonly confirmation/retry описаны в [SYSTEM_MAP](SYSTEM_MAP.md). Это UI-проверка proposal, не часть будущего mutation API и не подтверждение new-document defaults.
+
 
 При получении штатного PDF адаптер проверяет актуальную идентичность и revision документа
 и соответствие подтверждённому snapshot. Изменённый после подтверждения документ
@@ -58,7 +63,7 @@ Preview включает также `supply_date`, валюту, реквизи�
 полем snapshot. Если период не нужен, основание определяется датой. Старый запрос
 периода и новый запрос даты с тем же периодом не должны создавать разные документы.
 Как именно он получается, определяет исследование конкретной конфигурации.
-Python не выбирает цены, налоги, договоры, услуги или реквизиты самостоятельно.
+Python разрешает эти значения только по проверенным provider данным/явным grounded предложениям пользователя, не из предположений модели.
 
 Operation ID вычисляется из версии сценария и ключа основания. Это средство корреляции,
 само по себе оно не обеспечивает идемпотентность. Уникальность и её транзакционная
@@ -91,13 +96,11 @@ API, затем преобразует во внутренние модели. �
 
 ## Что нужно от владельца 1С
 
-### Read-only пользовательские правки
+### Read-only пользовательские предложения
 
-`InvoiceCommand.preview_overrides` содержит tuple `PreviewLineOverride(line_number, price?, description?, tax?)` без IDs. Это только явные правки уже подготовленного preview. `price` — net unit price; `tax` — exact rate/without_tax/with_tax/named profile. Неизвестная ставка не становится financial default. `description` сохраняет service ID.
+`InvoiceCommand.initial_overrides` indexes explicitly requested services; `preview_overrides` addresses an existing preview. `PreviewLineOverride` carries `line_number`, mutually exclusive net `price`/net line `amount`, optional currency/description/tax, without provider IDs. Service obtains a valid baseline and adds source ID/LineNumber locally in ResolvedPreviewLineOverride. Multi-source provenance is checked per line. Exact grounding/source/tax/rounding behavior: [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md), [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md).
 
-Сервис добавляет в `ResolvedInvoiceCommand` внутренние `preview_source_id` и `ResolvedPreviewLineOverride.source_line_number` из предыдущего подготовленного snapshot. FirstBit проверяет posted source и исходную арифметику до применения правок, не переносит их на другой source/LineNumber, подтверждает налог через Catalog_VATRates. `InvoicePreview.user_overrides` должен точно соответствовать пользовательским полям resolved request. `BillingBasis` schema и сигнатуры OneC остаются прежними. Ручные исправления меняют digest/revision, сохраняя billing identity.
-
-Refresh заново читает source/tax и повторяет вычисления. Любая попытка edit отзывает подтверждение. Все ручные предложения блокируются в `execute()` независимо от provider/caller permission, в том числе fake; это не write contract. [Подробные правила](firstbit/PREVIEW_REVISIONS.md).
+Historical/manual/preview-only proposals cannot execute even with caller write permission, including manual fake proposals. Readonly confirmation refreshes basis and stops without authoritative operation reconciliation; real read_operation returns unknown. BillingBasis schema remains key/client_id/revision/preview. Price/date/quantity edits do not by themselves change business identity; source/issuer/contract/period identity drift can block the old operation. This extension is not a writable-provider contract.
 
 ### Будущий write contract
 

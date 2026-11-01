@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns="http://v8.1c.ru/8.3/MDClasses" xmlns:app="http://v8.1c.ru/8.2/managed-application/core" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xr="http://v8.1c.ru/8.3/xcf/readable" version="2.14">
+  <ExternalDataProcessor uuid="08f8984a-5a69-4cd7-8871-42d3c3899ae5">
+    <InternalInfo>
+      <xr:ContainedObject><xr:ClassId>c3831ec8-d8d5-4f93-8a22-f9bfae07327f</xr:ClassId><xr:ObjectId>8e19b74e-cf9a-45d8-aab4-d26dd14b24d3</xr:ObjectId></xr:ContainedObject>
+      <xr:GeneratedType name="ExternalDataProcessorObject.OneCInvoicePrintDiscovery" category="Object"><xr:TypeId>84aa07c0-c45b-4314-b3a3-a9d9854aeec0</xr:TypeId><xr:ValueId>54f87256-6bb9-4747-af46-ce78b1eeb90b</xr:ValueId></xr:GeneratedType>
+    </InternalInfo>
+    <Properties>
+      <Name>OneCInvoicePrintDiscovery</Name>
+      <Synonym><v8:item><v8:lang>en</v8:lang><v8:content>Invoice print discovery (read-only)</v8:content></v8:item></Synonym>
+      <Comment>Metadata names and HTTP route declarations only. No publication, business reads, printing or financial writes.</Comment>
+      <DefaultForm>ExternalDataProcessor.OneCInvoicePrintDiscovery.Form.MainForm</DefaultForm><AuxiliaryForm/>
+    </Properties>
+    <ChildObjects><Form>MainForm</Form></ChildObjects>
+  </ExternalDataProcessor>
+</MetaDataObject>

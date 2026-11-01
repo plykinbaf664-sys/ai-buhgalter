@@ -98,7 +98,8 @@ def test_unknown_operation_state_never_calls_mutation():
     asyncio.run(scenario())
 
 
-def test_real_write_requires_explicit_flag():
+@pytest.mark.parametrize("permission", [False, True])
+def test_real_write_requires_explicit_flag_and_durable_store(permission):
     class RealShape(FakeOneC):
         is_fake = False
         writes = 0
@@ -109,7 +110,7 @@ def test_real_write_requires_explicit_flag():
 
     async def scenario():
         backend = RealShape()
-        service = InvoiceService(backend)
+        service = InvoiceService(backend, allow_real_writes=permission)
         prepared = await service.prepare(parse_command("Создай счёт для ООО Ромашка за сентябрь 2026"), "tg-1", 1)
         with pytest.raises(WorkflowFailure) as error:
             await service.execute(prepared, "tg-2", 1)
@@ -118,8 +119,9 @@ def test_real_write_requires_explicit_flag():
     asyncio.run(scenario())
 
 
-def test_native_adapter_pdf_is_passed_through_without_mock_renderer(monkeypatch):
+def test_native_adapter_pdf_is_passed_through_without_mock_renderer(monkeypatch, tmp_path):
     from app.domain import PdfDocument
+    from app.operations import OperationJournal
     native = PdfDocument(content=b"%PDF-1.7\nnative-test-document\n%%EOF")
     class NativeTestAdapter(FakeOneC):
         is_fake = False
@@ -133,7 +135,8 @@ def test_native_adapter_pdf_is_passed_through_without_mock_renderer(monkeypatch)
     monkeypatch.setattr("app.fake_onec.render_mock_pdf", forbidden)
     async def scenario():
         backend = NativeTestAdapter()
-        service = InvoiceService(backend, allow_real_writes=True)
+        service = InvoiceService(backend, allow_real_writes=True, journal=OperationJournal(
+            tmp_path / "state" / "native.sqlite", namespace="synthetic-native-test", create=True))
         prepared = await service.prepare(parse_command("Создай счёт для ООО Ромашка за сентябрь 2026"), "native", 123)
         result = await service.execute(prepared, "native", 123)
         assert result.pdf == native and len(backend.documents) == 1

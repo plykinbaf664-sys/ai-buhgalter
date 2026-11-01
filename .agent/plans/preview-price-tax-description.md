@@ -1,5 +1,7 @@
 # Explicit user price, tax and line-description revisions
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/PREVIEW_REVISIONS.md](../../docs/firstbit/PREVIEW_REVISIONS.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal and authorization
 Owner explicitly requests price/tax/service-name corrections in the existing read-only preview. This supersedes the prior prohibition on user price changes only for explicit grounded preview edits. Model-invented prices/rates/IDs remain forbidden. FirstBit remains dedicated-reader ENV/SecretStr, TLS verified, GET only, writes false; no create/post/PDF.
 

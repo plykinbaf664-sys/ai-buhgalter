@@ -1,5 +1,6 @@
 import os
 import re
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, SecretStr, field_validator, model_validator
@@ -22,14 +23,24 @@ class Settings(StrictModel):
     token: SecretStr
     webhook_secret: SecretStr
     allowed_users: frozenset[UserId] = Field(min_length=1)
-    mode: Literal["mock", "firstbit_readonly"] = "mock"
+    mode: Literal["mock", "firstbit_readonly", "firstbit_write"] = "mock"
     onec_write_enabled: bool = False
+    firstbit_native_ui_enabled: bool = False
     # One-shot failures for manual recovery checks. Safe only for the in-memory fake.
     fake_onec_fault: Literal["disabled", "create_lost_response", "post_lost_response"] = "disabled"
     ai_mode: Literal["disabled", "openai"] = "disabled"
     openai_api_key: SecretStr | None = None
     llm_model: str = Field(default="auto", max_length=100)
     stt_model: str = Field(default="auto", max_length=100)
+    operation_db: Path | None = None
+    firstbit_write_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @field_validator("operation_db")
+    @classmethod
+    def private_operation_path(cls, value):
+        if value is not None and not value.is_absolute():
+            raise ValueError("INVOICE_OPERATION_DB must be an absolute private path")
+        return value
 
     @field_validator("token")
     @classmethod
@@ -47,9 +58,14 @@ class Settings(StrictModel):
 
     @model_validator(mode="after")
     def ai_configuration(self):
-        if self.onec_write_enabled:
+        if self.firstbit_native_ui_enabled and (self.mode != 'firstbit_write' or not self.onec_write_enabled):
+            raise ValueError('Native financial UI requires firstbit_write with explicit write permission')
+        if self.onec_write_enabled and self.mode != 'firstbit_write':
             raise ValueError("ONEC_WRITE_ENABLED cannot be true in mock or firstbit_readonly mode")
-        if self.mode == "firstbit_readonly" and self.fake_onec_fault != "disabled":
+        if self.mode == 'firstbit_write' and (not self.onec_write_enabled or self.operation_db is None
+                or self.firstbit_write_schema_sha256 is None):
+            raise ValueError('firstbit_write requires explicit write flag, existing journal and reviewed schema pin')
+        if self.mode != 'mock' and self.fake_onec_fault != "disabled":
             raise ValueError("Fake faults are unavailable in firstbit_readonly mode")
         if self.ai_mode == "openai":
             if (self.openai_api_key is None or not self.openai_api_key.get_secret_value().strip()
@@ -70,9 +86,12 @@ class Settings(StrictModel):
             allowed_users=frozenset(int(part.strip()) for part in raw.split(",")),
             mode=os.environ.get("APP_MODE", "mock"),
             onec_write_enabled=_strict_bool(os.environ.get("ONEC_WRITE_ENABLED", "false")),
+            firstbit_native_ui_enabled=_strict_bool(os.environ.get("FIRSTBIT_NATIVE_UI_ENABLED", "false")),
             fake_onec_fault=os.environ.get("FAKE_ONEC_FAULT", "disabled"),
             ai_mode=os.environ.get("AI_MODE", "disabled"),
             openai_api_key=os.environ.get("OPENAI_API_KEY") or None,
             llm_model=os.environ.get("OPENAI_LLM_MODEL", "auto"),
             stt_model=os.environ.get("OPENAI_STT_MODEL", "auto"),
+            operation_db=Path(os.environ["INVOICE_OPERATION_DB"]) if os.environ.get("INVOICE_OPERATION_DB") else None,
+            firstbit_write_schema_sha256=os.environ.get('FIRSTBIT_WRITE_SCHEMA_SHA256') or None,
         )

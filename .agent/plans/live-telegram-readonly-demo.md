@@ -1,5 +1,7 @@
 # Live Telegram voice demonstration, FirstBit read-only
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/READONLY_PIPELINE.md](../../docs/firstbit/READONLY_PIPELINE.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal and authorization
 Owner requested application restart and real Telegram/OpenAI verification: accountant voice -> STT/LLM -> FirstBit -> invoice preview in chat. Production create/post/PDF remain forbidden; future posting requires a separate plan and controlled write admission.
 

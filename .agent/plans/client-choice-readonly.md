@@ -1,5 +1,7 @@
 # Explicit client selection for read-only previews
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/COMPANY_SEARCH.md](../../docs/firstbit/COMPANY_SEARCH.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal and evidence
 An actual human Telegram voice passed STT and reached FirstBit resolution, which correctly stopped on two active records with identical names. Owner requests buttons to choose a record, and explicitly selected option 1 from the private diagnostic. Neither record has posted invoice history; do not manufacture a preview or financial basis.
 

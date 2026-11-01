@@ -1,89 +1,32 @@
-# FirstBit / 1C Integration Evidence
+# FirstBit integration evidence
 
-## Purpose
+Repository-safe provider findings, distinguished from code behavior. Fresh FirstBit metadata/GET establishes provider facts; code/tests establish what this adapter actually implements. This document is a research inventory, not a second runtime contract.
 
-This document is the stable, repository-safe orientation for the real FirstBit integration.
+Current implementation/consumed fields and limits: [READONLY_PIPELINE](READONLY_PIPELINE.md). Feature behavior: [INITIAL_REQUESTS](INITIAL_REQUESTS.md), [COMPANY_SEARCH](COMPANY_SEARCH.md), [PREVIEW_REVISIONS](PREVIEW_REVISIONS.md). Private snapshot coverage: [METADATA_COVERAGE](FIRSTBIT_METADATA_COVERAGE.md). Dated proof scope: [VERIFICATION](../VERIFICATION.md).
 
-It does **not** replace:
-- current code and tests;
-- `docs/onec-contract.md`;
-- fresh FirstBit `$metadata`;
-- read-only runtime evidence.
+## Verified wire and business observations
 
-It exists so a coding agent can understand what has already been proven, what remains unknown, and where to look before changing the real 1C adapter.
+- Standard OData/Basic Auth reads succeeded with the owner-attested dedicated reader and TLS. Rights attestation is not a programmatic permissions audit.
+- Double numerics, digit-string Int64 LineNumber and `%20` query spaces were confirmed by actual metadata/GET. tolower and equality on unbounded DescriptionFull were unsupported. Company lookup now uses local name pages; old substring probes are not its current implementation.
+- Posted source issuer and current contract issuer can differ despite agreeing client/contract/currency. Both entity references can be verified, but this does not establish which issuer is correct for a new document. The non-executable historical proposal preserves the mismatch.
+- Catalog_Items.Code is a verified Edm.String used for service-choice display. Current reader supports active Service items beyond the configured bookkeeping item, when per-service history is proven.
+- Runtime consumption is a smaller subset of the observed fields below. An observed additional field is not automatically required, selected or a current accounting default.
 
-Implementation/configuration: [READONLY_PIPELINE.md](READONLY_PIPELINE.md). The GET-only provider is implemented, offline-tested and has now passed live prepare/refresh on one client. No production mutations or real Telegram/OpenAI calls were part of that live check. The earlier investigation below remains context; current implementation findings are recorded separately here and in the guide.
+Raw evidence/diagnostics stay only under ignored `.local/firstbit/`; no customer names, Ref_Key values, TRNs, credentials, metadata/business dumps or production fixtures belong here. Tests use synthetic data. Private evidence is neither a runtime dependency nor application storage. Do not guess an OData field or financial rule from ordinary 1C conventions.
 
-## Current adapter live verification
+## Native adapter interface evidence
 
-Owner confirmed dedicated read-only account rights. GET metadata and Company/Contract/Item/history/VAT/UOM/Entity/Currency reads produced a typed historical preview and an unchanged re-read snapshot. No IDs, names, amounts, credentials or business payloads are recorded in this tracked evidence.
+Production create/read-back proved that FirstBit can normalize TaxInvoiceIsRequired independently of the submitted historical carryover value. It is a lifecycle flag, not authoritative proof of TaxInvoice existence. The full native provider checks the actual linked TaxInvoice and preserves exact financial/accounting read-back; the base controlled-draft provider retains its strict comparison. This observation does not authorize ignoring other field mismatches.
 
-Verified wire differences from initial synthetic assumptions:
-- numeric fields are Edm.Double and are validated as bounded Decimal values;
-- LineNumber (Edm.Int64) is serialized as a positive digit string;
-- query spaces require `%20`, not form-encoded `+`;
-- tolower is rejected by the endpoint;
-- DescriptionFull equality fails because the field is unbounded; substringof candidates work, with mandatory local normalized exact match and a bounded candidate limit.
 
-Private metadata/response diagnostics and a formatted preview remain under ignored `.local/firstbit/`. FIRSTBIT_SMOKE_CLIENT is a test input only; the application resolves the client specified by each Telegram request.
 
-Subsequent targeted GETs exposed a separate historical source/current-contract issuer mismatch, with both entities independently verified and currency agreeing. Exact bundle members confirm both Entity references but do not justify silently overriding the current contract for a new document. The app therefore requires an explicit historical-supplier review before showing that non-executable proposal, retaining the mismatch in provenance and blocking any future write admission. Actual owner Telegram review/preview delivery passed; synthetic voice through real OpenAI/FirstBit and read-only refresh also passed. No new provider fields were needed. Full verification scope: [LIVE_DEMO.md](LIVE_DEMO.md).
+Fresh publication exposes Catalog_BusinessActivities, Catalog_ExpenseItems and Document_TaxInvoice. The InventoryExpense Department association targets Catalog_BaseUnits. Historical analytical refs must be checked as live records; publication/detail coverage does not establish accounting defaults.
 
-## Security classification
+A fresh dedicated-user browser opened an existing TaxInvoice by standard native navigation link, and its native GetURL -> Show link returned the same reference. The standard internal reference encoding reorders UUID segments; app/firstbit_ui.py implements and tests the reversible conversion without saved sessions.
 
-The Git repository may be public.
+Native Print -> Tax Invoice (EN, landscape) -> Save Printable Document -> Save to Local Folder with PDF only produced a genuine one-page landscape PDF containing that TaxInvoice number. The adapter also exercised printing after fresh OData schema/document guards. The Moxel form initializes asynchronously; a visible command bar alone is not proof that a command has completed. The dedicated Generate Tax Invoice action invoked the observed GenerateTaxInvoice function and produced a linked TaxInvoice. Generic Create Based On -> Tax Invoice instead opens an unsaved Tax Invoice (create) form and is not an admitted substitute. The controlled source and TaxInvoice were both posted and verified; native PDF delivery completed through recovery.
 
-Therefore this document must not contain:
-- FirstBit credentials;
-- Basic Auth headers;
-- production passwords/tokens;
-- full production metadata dumps;
-- customer directories;
-- bank-account dumps;
-- invoice-history dumps;
-- TRN lists;
-- GL exports;
-- raw production responses;
-- real customer names or production document payloads unless explicitly approved.
-
-Raw production evidence belongs only in a local/private ignored directory or another approved private store.
-
-Recommended local layout:
-
-```text
-.local/firstbit/
-├── metadata/
-│   ├── index.json
-│   ├── details.json
-│   ├── posting-dependencies.json
-│   └── standard-odata-metadata.xml
-├── samples/
-│   ├── companies.json
-│   ├── contracts.json
-│   ├── items.json
-│   ├── invoices.json
-│   └── item-prices.json
-└── README.md
-```
-
-The repository now ignores all `.local/` in `.gitignore`.
-
-Coding agents may read these files when they are available locally, but application code and tests must not depend on their presence.
-
-Production-derived test fixtures committed to Git must be minimized, anonymized and sanitized.
-
-## Source-of-truth order
-
-For exact FirstBit behavior:
-
-1. current application code and tests;
-2. fresh FirstBit `$metadata`;
-3. current read-only FirstBit responses;
-4. reviewed provider mapping/config;
-5. this document;
-6. old notes/chat history.
-
-Never guess an OData EntitySet, property or accounting rule because it "looks like normal 1C".
+TaxInvoice exposes Date, IssuingDate and DateOfOriginalSupply as Edm.DateTime. In the inspected native case their dates agree with the source Invoice. This is observed case evidence; read-back must check the confirmed date rather than assuming every future generation uses it.
 
 ## Environment already identified
 
@@ -94,8 +37,8 @@ Confirmed during integration discovery:
 - Basic Auth works for the dedicated integration user;
 - read-only production requests have succeeded;
 - a limited MVP OData surface was explicitly published;
-- current work is still read-only;
-- production create/post/PDF behavior has not yet been proven.
+- readonly application mode remains read-only;
+- native PDF and a controlled new Invoice/linked TaxInvoice production flow with recovery and Telegram delivery are proved; dated results belong to VERIFICATION.
 
 Exact endpoint, credentials and production identifiers must come from ENV/private local evidence, not this tracked document.
 
@@ -121,7 +64,7 @@ Relevant 1C object:
 Catalog.Companies
 ```
 
-Observed OData fields required by the current resolution flow include:
+Observed fields during research include the following; only the subset in READONLY_PIPELINE is consumed at runtime:
 
 ```text
 Ref_Key
@@ -137,13 +80,7 @@ VATTaxpayer
 PricesIncludeVAT
 ```
 
-Rules:
-- folders are not customers;
-- deleted records are ignored;
-- exact normalized `Description` / `DescriptionFull` is preferred;
-- reviewed aliases may map to a stable Ref;
-- fuzzy matching may suggest candidates but must not silently choose an ambiguous customer;
-- after resolution the application works with the stable Ref, not free text.
+Current canonical/fuzzy/alias/choice behavior is owned by [COMPANY_SEARCH](COMPANY_SEARCH.md). These observed fields do not all enter runtime selects.
 
 ## Contract resolution
 
@@ -167,27 +104,13 @@ DeliveryTerms_Key
 Inactive
 ```
 
-Rules:
-- try `Company.ContractByDefault_Key` first;
-- verify contract owner matches selected Company;
-- verify contract is active;
-- if default contract is unusable, search active contracts by owner;
-- exactly one fallback contract may be selected automatically;
-- zero GUID means an empty reference, not a real entity.
+Current default/fallback validation is owned by [READONLY_PIPELINE](READONLY_PIPELINE.md); a reference's existence alone does not prove active ownership or accounting defaults.
 
 Important evidence:
 
 A valid active customer contract can have empty PriceKind, SalesPaymentTerms and DeliveryTerms.
 
 The adapter must not assume these values always come from the contract.
-
-## Service / item resolution
-
-The current bookkeeping flow uses a real FirstBit Service item representing accounting and bookkeeping services.
-
-The exact production Ref belongs in private reviewed mapping/config, not scattered as magic strings in source.
-
-The adapter must preserve stable Item refs after resolution.
 
 ## Pricing evidence
 
@@ -207,23 +130,9 @@ Therefore:
 
 **Do not copy the FakeOneC pricing assumption into the real FirstBit adapter.**
 
-For the current read-only MVP, the latest matching posted invoice for the selected Company + Contract may be used as a **proposal source** for bookkeeping rows.
+Posted matching history is a proposal source, not an authoritative current tariff. Exact service/source selection and explicit user overrides are implemented as documented in INITIAL_REQUESTS.
 
 Historical values are not permanent tariffs and still require human confirmation.
-
-## Historical invoice resolution
-
-For the current bookkeeping MVP:
-
-1. resolve Company;
-2. resolve Contract;
-3. query posted, non-deleted `Document_InventoryExpense` records for that Company + Contract;
-4. inspect newest first;
-5. find the newest invoice containing the bookkeeping Item;
-6. preserve **all** matching rows from that invoice;
-7. build the proposal/preview from verified data.
-
-Never collapse multiple same-Item rows into one.
 
 ## Observed invoice header fields
 
@@ -366,7 +275,7 @@ Always inspect actual `$metadata` and response shape.
 
 A deliberately limited MVP set of FirstBit objects was published for the integration.
 
-The exact current whitelist should live in private reviewed evidence/config or an approved internal repository.
+The reviewed whitelist snapshot should live in private reviewed evidence/config or an approved internal repository.
 
 Do not:
 - auto-publish metadata objects;
@@ -375,113 +284,39 @@ Do not:
 
 Before write enablement, review the published surface again and remove anything not required.
 
-## Metadata drift
+## Unproven semantics and next evidence
 
-The intended safety model is:
+Observed PriceDate, GL/payment-version/bank references and VAT variants do not prove defaults for a new document. Included VAT/discount/cross-currency rules, legal tax applicability and authoritative tariff/default sources need explicit proof before support. Current reader deliberately accepts only the narrow checked arithmetic in READONLY_PIPELINE.
 
-```text
-fresh metadata
-→ compare with reviewed mapping/baseline
-→ unchanged: continue
-→ changed: block write and investigate
-```
+Real integration create/default execution, posting, durable uniqueness, restart-safe reconciliation and a write baseline are not established by this research. Native UI generation/printing evidence below does not establish a supported external API. The milestone/admission sequence is owned by [PROJECT_CONTEXT](../PROJECT_CONTEXT.md) and [SECURITY](../SECURITY.md), with transactional requirements in [onec-contract](../onec-contract.md).
 
-Rules:
-- no guessed mappings;
-- no automatic baseline acceptance;
-- read-only discovery may continue where safe;
-- production mutation must stop on relevant schema drift.
+## Native Tax Invoice generation and PDF: captured flow
 
-If the project keeps a schema baseline in Git, it must be sanitized and approved for the repository's visibility.
-Otherwise keep the raw baseline in private storage and commit only the minimal reviewed contract required by code/tests.
+Reviewed HAR and fresh production GET on 2026-10-31 establish:
 
-## LLM boundary
+- A native exported server function `GenerateTaxInvoice` accepts one source Invoice reference and returns a distinct Tax Invoice reference. Native exported names `TaxInvoiceFor`, `TaxInvoiceListFor`, `TaxInvoicesByBasis` also occur; their semantics/signatures are not established by their names.
+- The captured linked document is `Document.TaxInvoice`. Printing uses manager `Document.TaxInvoice`, template `TaxInvoiceLandscapeEN`, user form `Tax Invoice (EN, landscape)`, through `CommonForm.PrintDocuments`, spreadsheet/Moxel export and `PutSpreadsheetDocumentsInTempStorage` with PDF format. The returned temporary-storage address matches the captured download; decoded bytes are a real landscape PDF produced by 1C. The printed reference matches the generation result, not the source Invoice reference.
+- The captured case reports an already-posted Tax Invoice. This does not prove that every generation automatically posts. New operations must read the actual state; an already-posted document must not be posted again.
+- Fresh live Standard OData metadata exposes InventoryExpense and its Post action, but no TaxInvoice entity set, GenerateTaxInvoice action or native print/PDF action. Captured source Invoice read-back confirms a posted, non-deleted document. No financial mutation was made during investigation.
+- HAR generation/printing calls are internal web-client RPC, bound to session/module/version state. They are evidence, not a supported external integration API. Module ownership of GenerateTaxInvoice, transaction/uniqueness rules, external publication, exact native print signatures and independent TaxInvoice read-back remain unproved. Do not replay captured sessions or temporary URLs.
 
-OpenAI is used to understand natural-language intent.
+Raw capture, linked references, native PDF, fresh metadata and technical correlation summaries stay only in ignored `.local/firstbit/tax-invoice-flow/`. No production identities belong in fixtures. Next evidence: targeted configuration source/publication review, including both document managers and the actual module containing the captured exports. Runtime metadata alone cannot export module bodies. Integration status and admission: [PRODUCTION_OPERATION](PRODUCTION_OPERATION.md).
 
-Do not send bulk FirstBit data to the LLM.
+### Backend interface and accounting-reference verification
 
-The LLM must not receive:
-- full customer catalog;
-- full invoice history;
-- bank-account catalog;
-- GL chart;
-- tax-registration dump;
-- OData metadata;
-- FirstBit credentials.
+Additional production GET investigation on 2026-10-31 checked the service document, fresh metadata, publication bootstrap and standard SOAP/HTTP service roots, not just OData actions. OData metadata/service document and web bootstrap respond 200. The native `e1cib/modules/defs` path without captured session/module identifiers responds 403 with the integration identity. The SOAP root responds 500 `Service not found`; the HTTP root responds 404 and neither exposes service links. HAR contains no `/ws/` or `/hs/` service paths. These root responses **do not prove that all named SOAP/HTTP services are absent**; those routes are not a universal service directory. A supported existing service URL/WSDL/contract or publication inventory is the next minimal discovery input. New endpoint implementation or full configuration-source access is not established as necessary by these probes. Platform publication behavior: [1C publication settings](https://1c-dn.com/anticrisis/tools-and-technologies/embedded-web-client/setting-up/).
 
-Resolution of Company, Contract, Item, VAT, GL and historical basis is deterministic application/provider work after language parsing.
+> Historical pre-publication checkpoint, superseded by the fresh publication/native adapter evidence above. The earlier absence/404 results below do not describe current publication.
 
-## Current safe rollout
+Fresh scoped read-back of the selected posted, non-deleted historical source confirms two inventory rows with nonempty accounting dimensions. Exact referenced BaseUnit, IncomeItem and TradeDiscountsGLAccount records are readable and non-deleted. Referenced BusinessActivity and ExpenseItem catalogs exist in the full private configuration index but remain absent from fresh OData metadata; exact reference GETs return 404. Inventory row metadata supplies no navigation route to them. The controlled-create admission check still returns PROPOSAL_BLOCKED before mutation: the writer does not model/validate/carry all those dimensions and row connections. Published references alone do not remove that guard. These are source-document and reference read-backs, **not read-back of a newly created Invoice**.
 
-Current allowed production scope:
+Private bounded responses and summaries: ignored `.local/firstbit/backend-interface-proof/`. No create/post/generate call or captured-session replay was performed. An address/contract for an already available native integration service could close the discovery gap without source delivery; alternatively the missing references need a supported read/validation method and the native operations need a supported callable contract. Do not claim that publishing TaxInvoice alone exposes GenerateTaxInvoice or printing.
 
-```text
-Telegram / local command
-→ language parsing
-→ real FirstBit GET
-→ Company resolution
-→ Contract resolution
-→ historical bookkeeping basis
-→ real read-only preview
-```
 
-Current forbidden production scope:
+## Authoritative supplier VAT registration
 
-```text
-create
-update
-post
-unpost
-delete
-change OData publication
-change FirstBit configuration
-```
+Published InformationRegister_EntityRegistrationsWithTaxAuthorityAsVATPayer exposes Period, Entity_Key and Registration_Key. Catalog_RegistrationsWithTaxAuthorityAsVATPayer exposes Ref_Key, DeletionMark, DataVersion, Owner, Owner_Type and TRNVAT. Owner is a polymorphic string UUID whose observed type is StandardODATA.Catalog_Entities.
 
-Do not enable real write merely because read-only resolution succeeds.
+GET verified an effective registration for the approved supplier, a live nondeleted catalog record owned by that entity, and exact equality between TRNVAT and the native TaxInvoice.EntityTRN. Choose a unique latest effective Period, not a guessed flat entity property or an arbitrary historical TRN. Missing/zero/ambiguous/deleted/foreign registrations block. Catalog_Entities names alone never established an empty supplier TRN.
 
-## Write prerequisites
-
-Before the first real draft creation, the project must separately prove:
-- least-privilege integration-user permissions;
-- exact create payload semantics;
-- which FirstBit defaults/business logic run through Standard OData;
-- durable operation identity;
-- atomic uniqueness / duplicate prevention;
-- stale-basis protection;
-- lost-response reconciliation;
-- restart-safe recovery;
-- controlled draft-only test;
-- later, separate posting test;
-- later, separate standard-PDF retrieval test.
-
-## How Codex should use this document
-
-For ordinary application changes, Codex does not need to read raw FirstBit evidence.
-
-For FirstBit adapter work:
-
-1. read `AGENTS.md`;
-2. read `docs/ARCHITECTURE.md`, `docs/SECURITY.md`, `docs/onec-contract.md`;
-3. read this document;
-4. inspect current code/tests;
-5. only then inspect the minimum relevant file under `.local/firstbit/`;
-6. update typed models/mapping/tests from evidence;
-7. never copy raw production payloads into committed fixtures;
-8. report exactly which private evidence was used.
-
-The private evidence is supporting evidence, not application configuration and not runtime storage.
-
-## Known unknowns
-
-Still not proven:
-- direct production create behavior;
-- automatic defaults during OData create;
-- production posting contract;
-- standard PDF retrieval contract;
-- durable FirstBit-side idempotency mechanism;
-- restart-safe application operation state;
-- final PaymentTermsVersion selection;
-- complete cross-currency behavior.
-
-Treat these as open engineering questions, not missing values to guess.
+Direct WHERE comparisons on TaxInvoice.DocumentBasis were rejected by this publication. Reconciliation therefore scans bounded, ordered minimal relation keys without party filtering, then validates the matched full document. A linked record with wrong parties must be a conflict rather than invisible to duplicate protection. No full customer/invoice dump or arbitrary nextLink is required.

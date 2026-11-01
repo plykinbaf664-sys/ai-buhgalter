@@ -65,7 +65,7 @@ Security model строится по принципам:
 
 Current read-only implementation also rejects true under `APP_MODE=firstbit_readonly`. `FirstBitSettings` requires a dedicated account attestation and rejects admin-like usernames, empty credentials, zero Item IDs and non-HTTPS/credential-bearing/non-root URLs. Attestation does not prove server privileges: owner must verify permissions. `.local/` is ignored in full.
 
-`app/firstbit.py` exposes only bounded GET over verified TLS, with redirects, retries and ambient proxies disabled. Fresh metadata verifies consumed fields/types before resolution. OData text is a quoted literal; reference filters use UUIDs; no nextLink or arbitrary URL execution. Mutation/PDF protocol methods unconditionally reject calls. The service independently rejects preview-only providers and historical proposal execution even when a caller enables writes. Verify-only confirmation does not claim operation reconciliation; provider read_operation remains unknown.
+`app/firstbit.py` exposes only bounded GET over verified TLS, with redirects and ambient proxies disabled; one extra identical GET is allowed only after transport error/timeout. Fresh metadata verifies consumed fields/types before resolution. OData text is a quoted literal; reference filters use UUIDs; no nextLink or arbitrary URL execution. Its mutation/PDF methods reject calls. The service rejects unadmitted historical/manual proposals independently of caller permission. Readonly confirmation stops after refresh; its operation state remains unknown. The separate controlled-create subclass and mandatory journal/schema/accounting-review admission are owned by [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md); this does not enable automatic posting or PDF.
 
 FirstBit proposal bank/payment/supply/tax-registration defaults are not inferred. Missing line financial values block the proposal; missing new-document defaults remain explicit write blockers. The real-mode interpreter receives an empty draft instead of provider-derived context; user text and voice continue through existing AI boundaries. See `firstbit/READONLY_PIPELINE.md` for exact limits and live GET evidence. Live query encoding uses RFC3986 spaces and local exact name validation, so server candidate searches cannot silently select a partial match.
 
@@ -101,7 +101,8 @@ For current invoice creation flow, LLM should receive only the minimum user-lang
 
 ### Financial write safety
 `app/service.py`:
-- real provider write is blocked unless `allow_real_writes=True`;
+- Non-fake mutation now requires both explicit permission and a durable operation journal; this alone cannot unlock the current FirstBit reader. Exact mechanisms/admission limits: [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
+- preview-only and unadmitted historical/manual proposals are blocked from execution; explicitly reviewed native proposals use PRODUCTION_OPERATION admission; `allow_real_writes=True` alone cannot admit the GET-only FirstBit adapter;
 - read state before mutation;
 - `unknown` blocks mutation;
 - basis is refreshed before confirmation;
@@ -127,7 +128,7 @@ It may log:
 - document ID;
 - stage/status/safe error type.
 
-Production deployment must define retention/access rules for these identifiers.
+Server retention/access/redaction is configured for the project namespace; exact operational settings live in [SERVER_DEPLOYMENT](SERVER_DEPLOYMENT.md). This is not persistent operation storage.
 
 ## 3. FirstBit / 1C security rules
 
@@ -159,7 +160,7 @@ Rules:
 - publish only objects required by the workflow;
 - additions require justification;
 - never auto-publish newly discovered metadata;
-- review the 33-object MVP whitelist again before production rollout and remove objects not required by the actual adapter.
+- review the actually published surface against the adapter before expanding rollout; the historical 33-object MVP snapshot is not proof of current publication.
 
 ### Query minimization
 Real adapter must:
@@ -253,28 +254,16 @@ Before real write, FirstBit-side or equivalently durable uniqueness must prove:
 
 Process-memory dedupe in the current app is not enough for production.
 
-## 8. Production deployment requirements not yet implemented in repository
+## 8. Implemented deployment versus remaining admission gaps
 
-These are mandatory before write-enabled production:
+Typed real readonly mode, `FIRSTBIT_BASE_URL`/credentials through SecretStr, the GET-only adapter, consumed-field metadata guard and Linux service/HTTPS/private ENV/log retention are implemented. Operational details belong to [SERVER_DEPLOYMENT](SERVER_DEPLOYMENT.md), not a second configuration recipe here. TLS and owner attestation do not independently audit server permissions or network ACLs.
 
-- explicit real FirstBit mode in typed settings;
-- `ONEC_BASE_URL`, username, password/secret provider via `SecretStr`;
-- dedicated real adapter with GET-only mode first;
-- durable operation/recovery storage;
-- at-rest protection and access policy for that storage;
-- reverse proxy rate limiting;
-- TLS termination policy;
-- network ACL/VPN/IP allowlist where available;
-- log retention/access/redaction policy;
-- secret rotation procedure;
-- backup/restore and incident response procedure;
-- security review of the actual 1C service account permissions;
-- controlled rollout with a test company/document.
+Before write-enabled production, still prove durable operation/receipt/recovery storage and its protection, atomic business uniqueness, restart/concurrency/lost-response recovery, current accounting/default/tax applicability and reviewed payload semantics. Review OData publication and actual least-privilege account rights, network ACL/VPN/IP restrictions, secret rotation/backup/incident procedures and ingress abuse controls. Body bounds/process gate are implemented; proxy rate limiting is not established by the current deployment files. A full reviewed write schema/permissions baseline remains separate from today's consumed-field guard. Exact milestone sequence: [PROJECT_CONTEXT](PROJECT_CONTEXT.md).
 
 ## 9. Forbidden shortcuts
 
 Never:
-- use admin/Nastya credentials in runtime;
+- use administrator or personal employee credentials in runtime;
 - hardcode FirstBit credentials;
 - paste credentials into source/docs/tests;
 - log `Authorization`;
@@ -290,7 +279,7 @@ Never:
 
 ## 10. Security verification before write
 
-Minimum gate:
+Draft admission requires items 1–13 below; items 14–15 are the subsequent separate posting/PDF gates, not prerequisites to the first controlled draft. All require explicit approved targets.
 
 1. real adapter is read-only and tested;
 2. all existing tests pass;
@@ -329,10 +318,21 @@ OpenAI retry is confined to schema-constrained command parsing: at most two same
 
 Runtime transport recovery permits only one additional identical FirstBit GET after a transport error/timeout, with 0.2s backoff and existing deadlines. HTTP status/auth, oversized bodies, schema/financial validation and cancellation do not retry. This never applies to create/post/delete or operation reconciliation and does not relax TLS/identity/write guards. Local patch repair may deduplicate identical grounded values, recover a verbatim service title and normalize an unambiguous existing-preview action; conflicting values, new client/invoice scope or wrong-row bindings remain blocked.
 
-Explicit owner-requested price/tax/description revisions are allowed only on existing previews. The model returns current-message spans, not numeric prices/rates/provider IDs; deterministic parsing and local row/source binding enforce grounding. FirstBit verifies the original source before applying user proposals and resolves actual VAT records with fixed bounded GET templates. Currency mismatch, unsupported included VAT, ambiguous tax/row and source/line drift fail closed. Every manual preview is non-executable, even with a fake provider or a caller write flag; its digest includes the overrides. This does not establish legal tax applicability or write defaults. See [preview revisions](firstbit/PREVIEW_REVISIONS.md).
+## 12. Feature boundaries and their owning contracts
 
-Client-choice callbacks are scoped to an authorized private-chat user, random token, original typed command, candidate list and five-minute expiry. Only a stored candidate index can supply the internal selected_id; no raw text/LLM ID or arbitrary UUID callback is accepted. New input/cancel/restart invalidates choices. Adapter re-reads active candidates for the original query before continuing. Candidate names/IDs/TRN remain local or in that authorized Telegram chat, never model context or audit text. Choosing a client does not authorize financial defaults, create/post/PDF or substitution of another client's history.
+Explicit user initial money/services and subsequent preview corrections are non-executable proposals grounded in original message spans and a validated historical baseline. Numeric money/rates are decoded locally; actual tax catalog existence is not proof of legal applicability to a new document. Financial/source/rounding/currency failures stop rather than silently repair. Detailed policy lives in [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md) and [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md).
 
-Spelling-tolerant client search uses fresh name-only in-memory pages, 200 rows/page, bounded at 5000, fixed select/filter/skip/order and duplicate-page/nextLink/schema guards. No company query text enters OData and no name directory is cached, logged, persisted or sent to AI. Fuzzy/transliterated/spoken acronym matches only suggest up to five choices; exact normalized duplicates still require explicit selection. Auto-resolution requires complete discovery and one exact identity ignoring case/spacing/punctuation, followed by a fresh record check. A missing model client may be recovered from a clearly delimited verbatim user request, not an invented name/ID. See [company search](firstbit/COMPANY_SEARCH.md).
+Company/service selection uses locally stored candidate IDs, expiring user tokens and indices, never an LLM-provided or arbitrary callback UUID. Approximate identity requires review; fresh GET checks original-query scope and active state. Selection does not admit a financial mutation. Company search/speech rules live in [COMPANY_SEARCH](firstbit/COMPANY_SEARCH.md); service choices in [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md).
 
-Historical supplier mismatch is a separate review gate: both source and contract entities must exist and pass GET validation. The callback accepts only viewing that historical source, after refresh, scoped to the same client/contract/entities. It does not approve a new-document supplier, accounting defaults or write permission. Financial identity drift blocks and changed values require renewed review. Real model context carries field-availability booleans only. Low-confidence speech thresholds are unchanged; the recognized user text may be shown in that same private chat for correction and must not enter audit logs. No transcript persistence was added; private voice rehearsal files contain synthetic speech.
+Historical/current-contract supplier mismatch requires explicit review of the historical sample and fresh scope checks; it does not establish a new-document default. Confirmation/recovery state transitions live in [SYSTEM_MAP](SYSTEM_MAP.md). FirstBit method/byte/paging/schema constraints are owned by [READONLY_PIPELINE](firstbit/READONLY_PIPELINE.md).
+
+Raw user audio/text is sent to OpenAI only for enabled STT/language work. No FirstBit records/metadata/catalogs are sent; real intent context is empty draft plus boolean availability. Responses uses store=false; this is not a provider-retention guarantee. Uncertain recognition and failed parsing may show recognized user text only in the originating authorized private chat, not audit logs. SDK temporary audio is removed; in-memory receipts may retain a private pending response until delivery/restart. Private diagnostic captures require minimization and stay outside Git.
+
+
+## Native browser financial boundary
+
+The optional native FirstBit UI runtime runs on the VPS under the dedicated unprivileged service user, never a personal browser profile. Credentials remain ENV/SecretStr; browser profile, cookies, downloads and diagnostic responses are private ignored accounting state. Browser storage is confined to project .local/firstbit; downloaded files use generated local names rather than untrusted suggested paths. Verify the publication origin before credential entry and the exact native object reference before actions.
+
+Chromium keeps its user-namespace sandbox. A project-binary AppArmor userns profile and a scoped namespace allowlist replace the old blanket namespace denial; do not disable host-wide userns protection or use a no-sandbox/root browser. The service needs a larger task limit for Chromium; writable paths are only its own profile/cache/temp/operation storage. Other projects remain outside this deployment.
+
+The native UI flag is valid only in explicitly enabled firstbit_write mode. Financial clicks follow fresh reviewed schema/expected-document checks and durable one-shot provider claims. Login/navigation/printing retries cannot cover posting or generation clicks. Metadata health checks and safe operator events contain no response bodies; fresh write guards still fail closed independently of the scheduled check. Domain recovery rules and delivery uncertainty are owned by [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).

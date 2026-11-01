@@ -5,13 +5,14 @@
 Required for:
 - real FirstBit adapter spanning multiple modules;
 - public domain model changes such as `BillingBasis`;
-- adding `APP_MODE=real`;
+- adding any new real write-capable mode/provider admission;
 - persistent operation/recovery storage;
 - first real draft;
 - posting;
 - standard PDF retrieval;
 - metadata drift guard;
-- multi-worker deployment.
+- multi-worker deployment;
+- a new deployment topology or ownership/cutover boundary.
 
 Not required for a small isolated validator/test/doc correction.
 
@@ -71,37 +72,11 @@ Living checklist.
 Actual implementation and verification.
 ```
 
-## Suggested first plan: `real-firstbit-readonly.md`
+## Current and completed work
 
-Scope:
-- typed FirstBit settings;
-- typed GET-only OData client;
-- real adapter for resolve_client/service/basis;
-- historical bookkeeping proposal;
-- no writes;
-- no PDF;
-- no new process architecture.
+The real readonly adapter and single-worker Linux deployment are implemented. Completed records in `.agent/plans/` are historical execution evidence, not current rules or a request to rerun old rollout steps. Use their linked source-of-truth docs for present behavior. Case-only parser/discovery investigation notes have been archived privately rather than kept as permanent context.
 
-Acceptance:
-- all existing tests green;
-- new OData fixture tests green;
-- application-level MNSA-style read-only smoke works;
-- logs contain no secrets;
-- no write method exists/is reachable in the real adapter for this phase.
-
-## Suggested later plan: `real-firstbit-draft.md`
-
-Must not begin until read-only is accepted.
-
-Separately prove:
-- basis freshness;
-- atomic uniqueness;
-- operation ID persistence;
-- create payload/defaults;
-- lost-response reconciliation;
-- restart behavior.
-
-Posting and PDF remain later milestones.
+Next possible plan: controlled real draft admission, only with separate explicit authorization and an approved target. Prove current supplier/financial/default semantics, exact create behavior, dedicated rights, reviewed write schema, atomic uniqueness, durable operation/receipt/recovery storage, stale-basis handling and lost-response/restart/concurrency recovery first. Posting and standard PDF remain later separate plans. See [remaining milestones](../docs/PROJECT_CONTEXT.md).
 
 ## Mandatory security section for real-1C plans
 

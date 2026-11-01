@@ -77,8 +77,25 @@ def historical_preview_text(preview: InvoicePreview) -> str:
     if source.contract_entity_name:
         parts.append(f"В договоре другая организация: {source.contract_entity_name}. "
                      "Поставщик нового документа пока не подтверждён.")
-    parts.extend(("Для записи ещё нужны проверенные реквизиты, условия и дата оказания услуги.",
-                  "Можно изменить запрос текстом/голосом, проверить preview или отменить."))
+    if preview.execution_review is not None:
+        review = preview.execution_review
+        parts.extend(('', 'Учётные реквизиты предлагаются из образца. Непустые ссылки проверены в live 1С.',
+            'Это явный перенос для данного черновика; актуальный тариф или defaults не утверждаются.',
+            f'Оплата: 100% в дату счёта {review.payment_date:%d.%m.%Y}. Дата цен образца: {review.price_date:%d.%m.%Y}.'))
+        roles = {'BankAccount_Key': 'Банковский счёт', 'PaymentTerms_Key': 'Условия оплаты',
+            'PaymentTermsVersion_Key': 'Версия условий', 'AccountsReceivableGLAccount_GL_Key': 'Дебиторская задолженность',
+            'AdvancesReceivedGLAccount_GL_Key': 'Полученные авансы', 'GLAccount_GL_Key': 'Учёт услуги',
+            'SalesRevenueGLAccount_GL_Key': 'Выручка', 'OutputVATGLAccount_GL_Key': 'НДС'}
+        for item in review.references:
+            pieces = item.role.split(':')
+            role = pieces[-1]
+            if role in roles:
+                prefix = f'Строка {pieces[1]}, ' if len(pieces) == 3 else ''
+                parts.append(f'{prefix}{roles[role]}: {item.label}')
+        parts.append('Подтверждение создаст один ЧЕРНОВИК в 1С. Автоматическое проведение и штатный PDF пока заблокированы.')
+    else:
+        parts.extend((preview.write_blocker or 'Для записи ещё нужны проверенные реквизиты, условия и дата оказания услуги.',
+                      'Можно изменить запрос текстом/голосом, проверить preview или отменить.'))
     return "\n".join(parts)
 
 
@@ -88,7 +105,9 @@ def manual_changes_text(preview: InvoicePreview) -> str:
         fields = [label for field, label in (("price", "цена без НДС"), ("amount", "сумма без НДС"), ("tax", "налог"), ("description", "название"))
                   if getattr(edit, field) is not None]
         changes.append(f"строка {edit.line_number}: {', '.join(fields)}")
-    return "Изменено пользователем — " + "; ".join(changes) + ". Только preview; это не изменение данных 1С."
+    return "Изменено пользователем — " + "; ".join(changes) + (
+        '. Изменения включены в подтверждаемый план черновика.' if preview.execution_review is not None else
+        ". Только preview; это не изменение данных 1С.")
 
 
 def message_chunks(text: str) -> tuple[str, ...]:

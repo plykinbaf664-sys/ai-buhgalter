@@ -1,5 +1,7 @@
 # FirstBit production read-only preview
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/READONLY_PIPELINE.md](../../docs/firstbit/READONLY_PIPELINE.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal and scope
 Telegram text/voice uses the existing interpreter, service, typed preview and edit/cancel flow with a new GET-only FirstBit provider. Stop at preview verification. No draft, posting, PDF, publication changes or persistence work.
 
@@ -40,26 +42,8 @@ FirstBit credentials are absent from current process ENV and `.env.local` key na
 - Verify-only refresh never claims not_started reconciliation. Unknown operation lookup stays unknown, while a failed proposal refresh does not invent a financial recovery operation.
 - `.env.local` gained blank FIRSTBIT fields only; existing secrets/settings were preserved. Full `.local/` ignored, with no tracked files under it.
 
-## Result
+## Completed checkpoint result
 
-Implementation, synthetic application smoke and regression are complete. Live GET smoke is BLOCKED before network access because credentials/client/date are not configured, as confirmed by owner. The owner will fill ENV later using `docs/firstbit/READONLY_PIPELINE.md`. No production FirstBit contact, no production side effects, no create/post/PDF. Final verification commands/results are recorded in `docs/VERIFICATION.md`.
+The GET-only provider, typed historical proposal, consumed-schema guard and verify-only confirmation were implemented. Original synthetic regression and offline smoke passed; subsequent dedicated-reader GET prepare/refresh also passed. Intermediate credential/encoding/search investigations are archived privately instead of retained as alternative implementation instructions. Current provider facts/mapping: READONLY_PIPELINE and FIRSTBIT_INTEGRATION_EVIDENCE; current proof scope: VERIFICATION.
 
-Final results: 330 tests passed (267 existing + 63 new); synthetic application smoke PASS (61 GETs, 3 mocked AI requests, zero mutations/PDFs); existing demo and HTTP smoke PASS; pip check, compileall and diff whitespace checks PASS. Production-derived files remain ignored and untracked.
-
-## Live validation follow-up
-
-Owner supplied credentials and explicitly confirmed read-only account rights. Set the attestation true; removed accidental outer whitespace in the login. Initial auth failed 401, then GET metadata succeeded 200. Private live metadata is saved only in ignored `.local/firstbit/metadata/live-standard-odata-metadata.xml` (234691 bytes). Targeted schema inspection proves numeric VAT/document/line fields use Edm.Double, unlike the synthetic Edm.Decimal fixture. Extend the reviewed numeric wire guard to support those two finite numeric representations while preserving exact Decimal/domain/arithmetic validation; unknown field types still block. Add regression proving alternate clients are independent of FIRSTBIT_SMOKE_CLIENT. Continue only GET, stop before writes. Smoke date is malformed in local ENV; use today's date for the read-only verification and document this assumption.
-
-Bounded live GET comparison proved the endpoint mishandles form-encoded `+` in filter spaces: `DeletionMark eq false` with HTTPX QueryParams returned a deleted row, while RFC3986 `%20` returned a nondeleted row (both selected two fields with top=1). Use structured internal params encoded with `urlencode(..., quote_via=quote)`; retain literal escaping and UUID validation. Add an injection/encoding regression before continuing business resolution. No mutation was sent.
-
-The next GET returned HTTP 400 explicitly rejecting the `tolower` function. Replace it with exact Description/DescriptionFull equality preserving input spelling, followed by existing normalized local equality/ambiguity validation. No fuzzy match or catalog scan is introduced.
-
-Fresh GET then proved equality on unbounded DescriptionFull is rejected (HTTP 500, incompatible/unbounded comparison). Targeted bounded GETs independently verified Description equality and substringof on DescriptionFull both work and return one locally exact candidate. Use bounded Description equality OR DescriptionFull substring candidates, and still select ONLY normalized exact names locally. Substring matches alone never authorize a client; 20-candidate saturation blocks resolution.
-
-Company, contract and service resolved through live GET. All 79 returned historical rows serialize Edm.Int64 LineNumber as canonical positive digit strings. Add a field-specific OData Int64 decoder (not general coercion), retaining strict integer bounds and rejecting booleans/fractional/signed strings. No financial amount coercion/default guessing is introduced.
-
-## Latest result after live follow-up
-
-Live prepare/refresh PASS on one client: company, contract, item, posted history, VAT/UOM/entity/currency resolve into a one-line proposal and an unchanged refreshed snapshot. Standalone `--live --save-preview` PASS; private formatted review saved to ignored `.local/firstbit/readonly-preview.txt`. Application factory startup/health using actual local ENV returns 200/firstbit_readonly. Local mode switched from mock to firstbit_readonly; write flag remains false; invalid smoke date corrected to today's ISO date. Owner-approved attestation true; password preserved.
-
-339 tests PASS (267 original + 72 FirstBit/security/application), offline application smoke PASS, compileall and whitespace checks PASS. A dedicated two-client test proves FIRSTBIT_SMOKE_CLIENT is only a script input: other clients resolve their own contract/history/amounts and operation identity. Full-name candidate searches still require local exact matches. No production POST/PATCH/DELETE or create/post/PDF; no live Telegram/OpenAI calls. Stop at successful historical preview; draft-write remains a separate stage.
+BillingBasis stayed small; provenance is in the preview. No real create/post/PDF was enabled. Later generic-service, per-line-source, initial-money and Linux-hosting extensions supersede this original bookkeeping rollout without changing its read-only boundary. This historical record is not the current search algorithm, configuration procedure or milestone backlog.

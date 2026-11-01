@@ -1,0 +1,59 @@
+[Unit]
+Description=ai-buhgalteria - Telegram FirstBit invoice workflow
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=ai-buhgalteria
+Group=ai-buhgalteria
+WorkingDirectory=/srv/ai-buhgalteria/current
+EnvironmentFile=/srv/ai-buhgalteria/config/runtime.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 TZ=Europe/Moscow
+ExecStartPre=/srv/ai-buhgalteria/current/.venv/bin/python scripts/run_server.py --check
+ExecStart=/srv/ai-buhgalteria/current/.venv/bin/python scripts/run_server.py --port 8107
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ReadWritePaths=-/srv/ai-buhgalteria/operations
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=user pid net mnt ipc uts
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RuntimeDirectory=ai-buhgalteria
+RuntimeDirectoryMode=0700
+ReadWritePaths=/srv/ai-buhgalteria/state
+ReadWritePaths=/srv/ai-buhgalteria/workspace/.local/firstbit/native-ui
+ReadWritePaths=/srv/ai-buhgalteria/workspace/.local/browser-tmp
+ReadWritePaths=/srv/ai-buhgalteria/workspace/.local/browser-cache
+ReadWritePaths=/srv/ai-buhgalteria/workspace/.local/browser-config
+ReadWritePaths=/srv/ai-buhgalteria/workspace/.local/browser-data
+MemoryMax=1024M
+CPUQuota=75%
+TasksMax=384
+LimitNOFILE=1024
+StandardOutput=journal
+StandardError=journal
+LogNamespace=ai-buhgalteria
+SyslogIdentifier=ai-buhgalteria
+
+[Install]
+WantedBy=multi-user.target

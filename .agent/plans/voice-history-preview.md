@@ -1,5 +1,7 @@
 # Reliable voice -> historical invoice preview
 
+> Historical execution record, closed for current rollout. Statements, counts and pending observations below describe that checkpoint, not current availability or present requirements. Current behavior: [docs/firstbit/READONLY_PIPELINE.md](../../docs/firstbit/READONLY_PIPELINE.md); current verification: [VERIFICATION](../../docs/VERIFICATION.md).
+
 ## Goal
 One natural spoken invoice request -> grounded intent -> unique/explicitly selected client -> verified contract and posted bookkeeping history -> understandable read-only preview, with concise actionable clarifications only when necessary. No production writes, posting or PDF.
 

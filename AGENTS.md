@@ -1,127 +1,43 @@
 # AGENTS.md
 
-## Purpose
+## Project and discovery
 
-`ai-buhgalter` — Python/FastAPI Telegram workflow для подготовки и подтверждения счетов с будущей интеграцией FirstBit ERP / 1C.
+`ai-buhgalteria` — Python/FastAPI Telegram invoice workflow. `mock` implements fake create/post/PDF; `firstbit_readonly` prepares real historical proposals without creating documents. `firstbit_write` adds controlled draft creation and an explicit optional native TaxInvoice/PDF provider; admission and dated rollout evidence → PRODUCTION_OPERATION below. Linux hosting is deployed; local Windows/ngrok is a fallback.
 
-Текущий репозиторий уже реализует полный безопасный workflow поверх `FakeOneC`: текст/голос → типизированная команда → read-only resolution → `InvoicePreview` → подтверждение → create/post → PDF → Telegram, включая recovery, идемпотентность внутри fake-процесса и защиту от повторов.
+Start with `git status` / `git diff`, then relevant code/tests. This is a router: **do not read all docs for every change**. Local code/tests establish implemented behavior; fresh FirstBit `$metadata`/GET evidence establishes provider facts. Old plans/chat do not override either.
 
-Реальный GET-only адаптер `app/firstbit.py` подключён через `APP_MODE=firstbit_readonly`: `resolve_client` / `resolve_service` / `resolve_basis` возвращают typed historical proposal в `InvoicePreview`. Live GET prepare/refresh и отдельный supplier-review case с реальной доставкой preview проверены; write/post/PDF не реализованы. `FIRSTBIT_SMOKE_CLIENT` используется только проверочным скриптом и не ограничивает клиентов приложения. Настройка, точный mapping и blockers → `docs/firstbit/READONLY_PIPELINE.md`.
+## Routing
 
-Этот файл — короткий router. Не читай все docs перед каждой правкой.
+| Task | Source of truth |
+|---|---|
+| Product scope, supported modes, remaining milestones | [PROJECT_CONTEXT](docs/PROJECT_CONTEXT.md) |
+| Module ownership, runtime and state | [ARCHITECTURE](docs/ARCHITECTURE.md) |
+| End-to-end transitions, confirmation/recovery | [SYSTEM_MAP](docs/SYSTEM_MAP.md) |
+| Security, external data and mutation admission | [SECURITY](docs/SECURITY.md) |
+| Tests, commands and dated verification evidence | [VERIFICATION](docs/VERIFICATION.md) |
+| OneC API and writable-provider requirements | [onec-contract](docs/onec-contract.md), `app/domain.py` |
+| FirstBit objects/fields, configuration, schema/transport bounds | [READONLY_PIPELINE](docs/firstbit/READONLY_PIPELINE.md) |
+| Company discovery, approximate identity and uncertain speech | [COMPANY_SEARCH](docs/firstbit/COMPANY_SEARCH.md) |
+| Initial services/net amounts and per-line historical sources | [INITIAL_REQUESTS](docs/firstbit/INITIAL_REQUESTS.md) |
+| Production preparation, durable journal and prospective schema gate | [PRODUCTION_OPERATION](docs/firstbit/PRODUCTION_OPERATION.md) |
+| Edits to an existing preview | [PREVIEW_REVISIONS](docs/firstbit/PREVIEW_REVISIONS.md) |
+| Integration facts / private metadata coverage | [INTEGRATION_EVIDENCE](docs/firstbit/FIRSTBIT_INTEGRATION_EVIDENCE.md), [METADATA_COVERAGE](docs/firstbit/FIRSTBIT_METADATA_COVERAGE.md) |
+| Linux service, HTTPS, protected ENV, readiness/rollback | [SERVER_DEPLOYMENT](docs/SERVER_DEPLOYMENT.md) |
+| Local Windows/tunnel fallback | [LIVE_DEMO](docs/firstbit/LIVE_DEMO.md) |
+| Durable rationale / working style / execution plans | [DECISIONS](docs/DECISIONS.md), [AGENT_WORK_STYLE](docs/AGENT_WORK_STYLE.md), [.agent/PLANS](.agent/PLANS.md) |
 
-## Context discovery
+## Cross-cutting guards
 
-1. Определи затронутый flow.
-2. Прочитай только релевантный контекст.
-3. Сверь его с текущим кодом, тестами и конфигом.
-4. Для 1C/OData точные EntitySet/property names сверяй с `$metadata` и реальными GET, а не с догадками.
-5. Если prose расходится с кодом — код/tests/runtime evidence выше.
+- Keep typed Pydantic boundaries and existing OneC/service/bot ownership. Do not add layers or rewrite working flows without a concrete need.
+- Production FirstBit: dedicated least-privilege account, ENV/SecretStr, verified TLS. Readonly mode permits GET only; controlled-create admission → PRODUCTION_OPERATION. Successful preview never authorizes writes without explicit confirmation.
+- LLM extracts user intent/spans, not provider IDs or financial defaults. Provider records/catalogs/metadata never enter real AI context. Explicit user amounts/tax are locally grounded proposals, not authoritative tariffs.
+- Ambiguity, schema mismatch, unsupported arithmetic or unknown financial state fails closed. Approximate identity requires explicit selection; repeated service rows stay separate.
+- Any attempted edit revokes confirmation. Readonly confirmation stops after refresh; controlled creation preserves the frozen operation/digest and never retries an uncertain mutation blindly.
+- Default drafts/buttons/receipts are process-local: one worker. Optional confirmed-operation journal is described in PRODUCTION_OPERATION; controlled real E2E and restart/read-only replay are proved; exact evidence is in VERIFICATION.
+- No customer names, production IDs/TRNs, credentials or raw business/metadata dumps in Git. Private integration evidence stays under ignored `.local/firstbit/`.
 
-## Documentation routing
+## Plans and completion
 
-- Продукт, текущий rollout, различие fake/real → `docs/PROJECT_CONTEXT.md`
-- Реальная структура репозитория и архитектура → `docs/ARCHITECTURE.md`
-- Security model / 1C production safety → `docs/SECURITY.md`
-- End-to-end flows и ownership → `docs/SYSTEM_MAP.md`
-- Точные команды и regression matrix → `docs/VERIFICATION.md`
-- Долговечные решения и найденные противоречия → `docs/DECISIONS.md`
-- Рабочий стиль → `docs/AGENT_WORK_STYLE.md`
-- Сложные/high-risk изменения → `.agent/PLANS.md`
-- Контракт OneC adapter, уже существующий в репозитории → `docs/onec-contract.md`
-- FirstBit read-only реализация, ENV, smoke и blockers → `docs/firstbit/READONLY_PIPELINE.md`
-- Живой Telegram demo, restart, STT/LLM status → `docs/firstbit/LIVE_DEMO.md`
-- Активный ngrok tunnel → `scripts/start_ngrok_demo.py`; общий launcher сохраняет provider из runtime state. Switch без restart сохраняет app/draft; inspection off, token ENV/SecretStr.
-- Восстановление туннеля, network GET retry и regression evidence → `.agent/plans/runtime-recovery.md`, `tests/test_demo_runtime.py`, `docs/VERIFICATION.md`
-- Готовность перед показом → `scripts/check_demo_ready.py --deep`; TCP HTTP/2, ограниченный retry только SDK-разбора, без повторного STT/execute → `app/ai.py`, `tests/test_ai.py`, `docs/firstbit/LIVE_DEMO.md`
-- Выбор клиента кнопками и безопасность callback → `.agent/plans/client-choice-readonly.md`, `tests/test_client_choice.py`
-- Голосовые варианты названия/регистр/опечатки → `docs/firstbit/COMPANY_SEARCH.md`, `.agent/plans/voice-company-search.md`, `app/company_names.py`, `tests/test_company_search.py`
-- Голос → исторический образец, конфликт поставщика и компактный preview → `.agent/plans/voice-history-preview.md`, `docs/firstbit/LIVE_DEMO.md`
-- Ручные правки цены/НДС/названия в preview → `docs/firstbit/PREVIEW_REVISIONS.md`, `.agent/plans/preview-price-tax-description.md`, `tests/test_preview_overrides.py`
-- Первоначальные net-суммы, произвольные услуги и per-line исторические источники → `docs/firstbit/INITIAL_REQUESTS.md`, `.agent/plans/initial-request-financial-lines.md`, `tests/test_initial_lines.py`
-- FirstBit исследование → `docs/firstbit/FIRSTBIT_INTEGRATION_EVIDENCE.md`
-- Покрытие private metadata → `docs/firstbit/FIRSTBIT_METADATA_COVERAGE.md`
+Use an ExecPlan for real adapter/schema changes, metadata guard changes, persistence/concurrency/deployment changes, or real draft/write/post/PDF admission; see `.agent/PLANS.md`. Completed plans are historical records, not current runtime instructions.
 
-## Repository orientation
-
-Высокосигнальные файлы:
-
-- `app/domain.py` — Pydantic domain models, `OneC` Protocol, operation state, digests.
-- `app/service.py` — `InvoiceService.prepare/refresh/execute`, write guard, reconcile after uncertain mutation.
-- `app/bot.py` — Telegram workflow, pending confirmation, edit/cancel/retry, delivery dedupe.
-- `app/main.py` — FastAPI app, webhook security, allowlist, request dedupe, process-local receipts.
-- `app/config.py` — strict ENV settings; `APP_MODE=mock|firstbit_readonly`, write flag запрещён в обоих.
-- `app/firstbit.py` — typed settings, fresh consumed-schema guard, bounded GET-only adapter; никогда не создаёт документы.
-- `app/company_names.py` — локальные exact keys и approximate ranking имён; транслитерация/похожие имена только предлагают выбор, не выбирают ID.
-- `app/fake_onec.py` / `app/fake_data.py` — fake provider and fixtures.
-- `app/ai.py`, `app/language.py`, `app/intent.py`, `app/voice.py` — LLM/STT and controlled language-to-domain conversion.
-- `app/telegram.py` / `app/telegram_models.py` — Telegram transport and response validation.
-- `app/mock_pdf.py` — только TEST/MOCK PDF path.
-- `docs/onec-contract.md` — уже существующий adapter contract.
-- `tests/` — behavior/regression suite.
-- `scripts/demo.py`, `scripts/smoke.py`, `scripts/preview_invoices.py`, `scripts/live_ai_check.py` — reproducible checks.
-- `scripts/start_readonly_demo.py` / `run_local.py` / `register_demo_webhook.py` — локальный Windows demo runtime, скрытые процессы, typed ENV, защищённый Telegram webhook, архивация safe audit при restart. Реальные STT/LLM + FirstBit проверены на синтетическом OGG/Opus, затем настоящий Telegram supplier-review callback завершился доставкой реального preview. Не выдавать синтетическое аудио за человеческий voice. Запись/PDF выключены.
-
-## Cross-cutting invariants
-
-- Pydantic на внешних и критических внутренних границах; не заменяй typed models сырыми dict.
-- LLM не создаёт 1C IDs, цену, VAT, GL, договор или итоговые суммы.
-- Явные первоначальные суммы и последующие правки привязываются к валидному historical baseline: LLM выбирает spans, числа декодируются детерминированно, налог подтверждается справочником. Net-сумма строки отличается от цены единицы. Ручные правки не допускаются к execute даже в fake; переименование сохраняет ID услуги. Per-line source/LineNumber привязываются локально, не моделью. Полные правила → `docs/firstbit/INITIAL_REQUESTS.md`.
-- Свободный текст используется только для parsing/read-only resolution.
-- До явного подтверждения документ не создаётся.
-- Любая attempted edit отзывает старое подтверждение.
-- Перед write `InvoiceService.refresh()` перечитывает состояние операции и basis.
-- `operation_id = sha256("invoice:v1:" + BillingBasis.key)`; revision намеренно не входит в ID.
-- `read_operation=unknown` блокирует дальнейшие записи.
-- После исключения во время create/post сервис делает один read-only reconcile и не повторяет mutation вслепую.
-- `preview_digest` связывает документ с точным подтверждённым `InvoicePreview`.
-- `InvoiceService._write_guard()` запрещает real write без явного разрешения.
-- `ONEC_WRITE_ENABLED=true` невалиден в обоих режимах. Historical proposal и preview-only provider блокируются также в `InvoiceService.execute()` независимо от caller permission.
-- Mock PDF не должен использоваться в real adapter: production PDF только штатный из 1C.
-- Секреты не логировать и не переносить в docs/fixtures.
-- Production POST/PATCH/DELETE не выполнять без отдельного явного разрешения владельца.
-- Runtime 1C identity — только dedicated least-privilege account; admin credentials запрещены.
-- Raw user/LLM text не может формировать произвольный OData query/filter.
-- FirstBit GET может повториться один раз только при transport error/timeout, с прежним URL, TLS и лимитами. HTTP status/auth, oversized response, schema/financial validation и cancellation не повторяются. К mutation/reconcile правилам эта read-only retry policy не относится.
-- FirstBit data не отправлять в LLM сверх минимально необходимого intent-context.
-- В real AI context передаются только boolean-признаки наличия полей локального draft; имена/ID/строки/цены FirstBit остаются локально.
-- Различие Entity текущего договора и posted source не исправляется автоматически. Исторический поставщик и организация договора проверяются GET; bot требует явного выбора образца перед preview. Это не подтверждает поставщика нового документа и не снимает write guard.
-- TLS verification не отключать; credentials не хранить в URL/source/logs.
-
-## Current integration guard
-
-`create_app()` по умолчанию создаёт `FakeOneC`; при `APP_MODE=firstbit_readonly` создаёт `FirstBit` из ENV с lifecycle cleanup. Не подменять fake production-данными. Read-only confirmation только проверяет proposal, без execute и без ложного `read_operation=not_started`; реальный lookup пока возвращает `unknown`.
-
-Production Standard OData проверен текущим адаптером через live GET: metadata → клиент → договор → service → historical basis → preview → refresh. Живые особенности: Edm.Double, Int64 LineNumber-строка, query spaces `%20`; tolower и DescriptionFull equality не поддерживаются. Client search теперь локален: свежие name-only страницы по 200, максимум 5000; регистр/пробелы/пунктуация незначимы для единственного exact match. Транслитерация/голосовые буквы/опечатки/частичные совпадения только предлагают кнопки (до 5); выбранный ID перечитывается и проверяется по исходному запросу. Неполный список/неоднозначность блокируют автоматический выбор. Ни слова поиска, ни каталог не передаются в OData syntax/LLM. Не считать исторические данные defaults нового документа. Private metadata/preview только под ignored `.local/`.
-
-## Important integration mismatch to preserve explicitly
-
-Текущий fake/`docs/onec-contract.md` предполагает: предыдущий счёт даёт структуру/количество, а цена заново берётся из текущего каталога.
-
-В исследованной production FirstBit базе для `Accounting and bookkeeping services` authoritative `ItemPrices` не найден, а реальная цена/quantity повторяются по клиенту в исторических invoice lines и иногда меняются.
-
-Следствие: **не копируй fake pricing rule в real adapter автоматически**. Для production v1 historical line может быть proposal, который показывается в preview и требует human confirmation. Этот integration-specific rule должен быть покрыт отдельными тестами.
-
-## Complex work
-
-ExecPlan обязателен для:
-- нового real OneC/OData adapter;
-- изменения `BillingBasis` schema;
-- перехода read-only → write;
-- create/post/PDF против реальной 1C;
-- metadata drift guard;
-- production idempotency/persistence;
-- замены process-local state постоянным storage;
-- multi-worker/multi-process deployment.
-
-## Completion
-
-Перед завершением:
-- выполни релевантные tests/scripts;
-- укажи, какие команды реально запускались;
-- отдельно скажи, был ли контакт с production;
-- отдельно скажи, были ли только GET или были side effects;
-- не называй real 1C flow готовым, пока write/post/PDF не проверены.
-
-
-Speech recovery: low-confidence new voice in real readonly mode must pass company-choice callbacks even for one exact identity; uncertain edits and fake/write paths stay fail closed. Read-only `/retry` reuses typed draft without STT/LLM. FirstBit audit codes are allowlisted; never log arbitrary BackendFailure text. See `docs/firstbit/COMPANY_SEARCH.md` and `.agent/plans/runtime-recovery.md`.
+Before completion run relevant checks, report actual commands/results and separate offline, real API, synthetic audio and actual human Telegram evidence. Explicitly state production contact and side effects. Never call real create/post/PDF ready based on readonly tests. Documentation changes follow the ownership map in [README_CONTEXT_ENGINEERING](README_CONTEXT_ENGINEERING.md).

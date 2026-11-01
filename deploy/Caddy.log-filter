@@ -1,0 +1,3 @@
+# Import inside the existing default logger's filter fields.
+# Caddy's usual credential redaction does not cover this Telegram-specific header.
+request>headers>X-Telegram-Bot-Api-Secret-Token delete

@@ -115,6 +115,10 @@ class DeliveredInvoice(StrictModel):
 
 
 def failure_text(exc: WorkflowFailure) -> str:
+    if exc.stage.startswith('tax_'):
+        return (f'Исходный Invoice {exc.document_id} уже записан. '
+                'Связанный Tax Invoice или его PDF пока не подтверждены. '
+                '/retry сверит ту же операцию с 1С; повторное создание вслепую запрещено.')
     if exc.stage == "resolve":
         return "Не удалось получить данные 1С. Создание документа не запускалось. Повторите чтение командой /retry — наговаривать запрос заново не нужно."
     if exc.stage == "write_disabled":
@@ -135,7 +139,8 @@ class Bot:
                  speech: SpeechToText | None = None):
         self.service, self.telegram, self.interpreter = service, telegram, interpreter
         self.speech = speech
-        # One pending command per authorized user; no transcripts, audio or PDF stored.
+        # Unconfirmed conversations remain process-local. An optional private
+        # journal restores only already-confirmed operations and PDF delivery.
         self.pending: dict[int, Pending] = {}
         self.client_choices: dict[int, PendingClientChoice] = {}
         self.service_choices: dict[int, PendingServiceChoice] = {}
@@ -143,7 +148,8 @@ class Bot:
         self.supplier_reviews: dict[int, Pending] = {}
         self.contexts: dict[int, DraftContext] = {}
         self.last_contexts: dict[int, DraftContext] = {}
-        self.recoveries: dict[int, PreparedInvoice] = {}
+        self.recoveries: dict[int, PreparedInvoice] = (
+            service.journal.recoveries() if service.journal is not None else {})
         # The webhook receipt limit also bounds this set within one process.
         self.delivered: dict[DeliveredInvoice, PreparedInvoice] = {}
         self.delivery_attempted: set[DeliveredInvoice] = set()
@@ -178,19 +184,25 @@ class Bot:
                 f"Поставщик в этом счёте: {prepared.preview.issuer.name}\n"
                 f"В текущем договоре: {source.contract_entity_name}\n\n"
                 "Организации различаются. Показать образец по историческому счёту? "
-                "Это не выбирает организацию для записи нового документа."),
+                + ("Это не выбирает организацию для записи нового документа."
+                   if self.service.readonly_preview(prepared) else
+                   "В новом счёте будет поставщик из исторического образца. "
+                   "Проверьте его в preview перед окончательным подтверждением.")),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                     InlineButton(text="Показать образец из истории", callback_data=f"supplier:{pending_review.token}:accept"),
                     InlineButton(text="Отмена", callback_data=f"supplier:{pending_review.token}:cancel")]]))
         self.supplier_reviews.pop(uid, None)
         pending = Pending(token=secrets.token_hex(16), prepared=prepared, expires_at=time.monotonic() + 300)
         self.pending[uid] = pending
-        readonly = getattr(self.service.onec, "preview_only", False) is True or bool(prepared.preview.user_overrides)
+        readonly = self.service.readonly_preview(prepared)
         mode = ("\nREAD-ONLY: документ не создан. Запись, проведение и PDF отключены."
                 if readonly else "\nTEST / MOCK: реальные счета в 1С не создаются." if self.service.onec.is_fake is True else "")
+        if not readonly and getattr(self.service.onec, 'requires_tax_invoice', False) is True:
+            mode += '\nПодтверждение: Invoice → связанный Tax Invoice → штатный Tax Invoice (EN, landscape) PDF.'
         return ConfirmationPrompt(text=notice + preview_text(prepared.preview) + mode,
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineButton(text="Проверить preview" if readonly else "Подтвердить", callback_data=f"invoice:confirm:{pending.token}"),
+                InlineButton(text="Проверить preview" if readonly else "Создать черновик в 1С"
+                    if getattr(self.service.onec, "posting_enabled", True) is False else "Подтвердить", callback_data=f"invoice:confirm:{pending.token}"),
                 InlineButton(text="Изменить", callback_data=f"invoice:edit:{pending.token}"),
                 InlineButton(text="Отмена", callback_data=f"invoice:cancel:{pending.token}"),
             ]]))
@@ -361,7 +373,7 @@ class Bot:
             self.pending.pop(uid, None)
             raise
         except WorkflowFailure as exc:
-            if getattr(self.service.onec, "preview_only", False) is True or pending.prepared.preview.user_overrides:
+            if self.service.readonly_preview(pending.prepared):
                 self.pending.pop(uid, None)
             elif exc.state == "unknown":
                 self.pending.pop(uid, None)
@@ -372,7 +384,7 @@ class Bot:
             return self.show_preview(uid, refreshed, context.command,
                                      "Данные 1С изменились. Проверьте обновлённый счёт и подтвердите заново.\n\n")
         self.pending.pop(uid, None)
-        if getattr(self.service.onec, "preview_only", False) is True or pending.prepared.preview.user_overrides:
+        if self.service.readonly_preview(pending.prepared):
             return "Preview повторно проверен по данным FirstBit. Режим READ-ONLY: документ не создавался. Можно изменить запрос или отменить."
         return pending.prepared
 
@@ -707,14 +719,19 @@ class Bot:
                 if receipt.prepared is not None:
                     delivery = DeliveredInvoice(telegram_user_id=uid,
                                                 operation_id=receipt.prepared.operation_id)
-                    if delivery in self.delivered:
+                    journal = self.service.journal
+                    durable_status = journal.delivery_status(delivery.operation_id, uid) if journal is not None else None
+                    if delivery in self.delivered or durable_status == "delivered":
                         event(request_id=request_id, user_id=uid, stage="delivery", status="duplicate",
                               operation_id=delivery.operation_id)
-                        same = self.delivered[delivery].preview.digest == receipt.prepared.preview.digest
+                        old = self.delivered.get(delivery)
+                        if old is None:
+                            old = journal.get(delivery.operation_id).prepared
+                        same = old.preview.digest == receipt.prepared.preview.digest
                         receipt.prepared = None
                         receipt.response_text = ("Этот счёт уже отправлен вам. Второй PDF не отправляем." if same else
                             "На это основание уже создан и отправлен счёт с другими данными. Новую версию не создаём. Обратитесь к оператору.")
-                    elif delivery in self.delivery_attempted:
+                    elif delivery in self.delivery_attempted or durable_status == "sending":
                         event(request_id=request_id, user_id=uid, stage="delivery", status="unconfirmed",
                               operation_id=delivery.operation_id)
                         receipt.prepared = None
@@ -725,11 +742,31 @@ class Bot:
                     else:
                         stage = "invoice"
                         result = await self.service.execute(receipt.prepared, request_id, uid)
+                        if result.pdf is None:
+                            if result.invoice.posted:
+                                if journal is not None:
+                                    journal.finalized_without_pdf(delivery.operation_id, uid)
+                                self.recoveries.pop(uid, None)
+                                receipt.response_text = (f"Счёт №{result.invoice.number or result.invoice.document_id} проведён в 1С и проверен чтением. "
+                                    f"ID: {result.invoice.document_id}. Штатный PDF пока недоступен.")
+                            else:
+                                self.recoveries[uid] = receipt.prepared
+                                receipt.response_text = (f"Черновик счёта №{result.invoice.number or result.invoice.document_id} создан в 1С и проверен чтением. "
+                                    f"ID: {result.invoice.document_id}. Проведение заблокировано: нужна атомарная проверка в 1С. "
+                                    "Повторная операция не создаст новый счёт. /retry проверит этот же документ.")
+                            receipt.prepared = None
+                            await self.telegram.send_text(uid, receipt.response_text)
+                            receipt.response_sent = len(message_chunks(receipt.response_text))
+                            return
                         stage = "delivery"
+                        if journal is not None and not journal.claim_delivery(delivery.operation_id, uid):
+                            raise UserProblem("Доставка уже начата или выполнена. Автоматически повторять PDF нельзя; проверьте чат.")
                         # Telegram has no idempotency key for sendDocument. A lost response
                         # leaves delivery unknown, so a retry must not send another PDF.
                         self.delivery_attempted.add(delivery)
                         await self.telegram.send_pdf(uid, result.pdf.content, is_mock=self.service.onec.is_fake is True)
+                        if journal is not None:
+                            journal.delivered(delivery.operation_id, uid)
                         self.delivered[delivery] = receipt.prepared
                         self.recoveries.pop(uid, None)
                         context = self.contexts.pop(uid, None)
