@@ -195,7 +195,9 @@ class Bot:
         pending = Pending(token=secrets.token_hex(16), prepared=prepared, expires_at=time.monotonic() + 300)
         self.pending[uid] = pending
         readonly = self.service.readonly_preview(prepared)
-        mode = ("\nREAD-ONLY: документ не создан. Запись, проведение и PDF отключены."
+        mode = ("\nСоздание этого счёта заблокировано. Причина указана выше."
+                if readonly and getattr(self.service.onec, "write_capable", False) is True else
+                "\nREAD-ONLY: документ не создан. Запись, проведение и PDF отключены."
                 if readonly else "\nTEST / MOCK: реальные счета в 1С не создаются." if self.service.onec.is_fake is True else "")
         if not readonly and getattr(self.service.onec, 'requires_tax_invoice', False) is True:
             mode += '\nПодтверждение: Invoice → связанный Tax Invoice → штатный Tax Invoice (EN, landscape) PDF.'
@@ -385,6 +387,9 @@ class Bot:
                                      "Данные 1С изменились. Проверьте обновлённый счёт и подтвердите заново.\n\n")
         self.pending.pop(uid, None)
         if self.service.readonly_preview(pending.prepared):
+            if getattr(self.service.onec, "write_capable", False) is True:
+                reason = pending.prepared.preview.write_blocker or "Учётные реквизиты не подтверждены для записи."
+                return "Счёт не создан. Запись этого счёта заблокирована: " + reason
             return "Preview повторно проверен по данным FirstBit. Режим READ-ONLY: документ не создавался. Можно изменить запрос или отменить."
         return pending.prepared
 
@@ -503,7 +508,8 @@ class Bot:
                     + ("Сейчас TEST / MOCK: вымышленные данные и тестовый PDF, реальные счета не создаются."
                        if self.service.onec.is_fake is True else
                        "Сейчас READ-ONLY: только историческое предложение и проверка preview; запись и PDF отключены."
-                       if getattr(self.service.onec, "preview_only", False) is True else
+                       if (getattr(self.service.onec, "preview_only", False) is True
+                           and getattr(self.service.onec, "write_capable", False) is not True) else
                        "После подтверждения используется штатная печатная форма 1С."))
         if not is_voice and text == "/cancel":
             self.pending.pop(uid, None)

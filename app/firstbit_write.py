@@ -13,7 +13,7 @@ from urllib.parse import quote, urlencode
 from uuid import UUID
 import xml.etree.ElementTree as ET
 
-from pydantic import ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.domain import (AccountingReference, BackendFailure, BillingBasis, ExecutionReview,
                         ExternalModel, Invoice, InvoiceConflict, InvoicePreview, Label,
@@ -143,7 +143,7 @@ class WriteDocument(HistoricalInvoice):
     ProjectPosition: Label
     ProjectTaskPosition: Label
     Emirate: str = Field(max_length=100)
-    OffsetAdvancesDebtsAutomatically: Literal['No']
+    OffsetAdvancesDebtsAutomatically: Literal['Yes', 'No']
     Repetition: int = Field(ge=1, le=1)
     GoodsOrder: str = Field(pattern=r'^(|00000000-0000-0000-0000-000000000000)$')
     DocumentBasis: str = Field(pattern=r'^(|00000000-0000-0000-0000-000000000000)$')
@@ -445,6 +445,13 @@ class FirstBitWrite(FirstBit):
             preview = InvoicePreview(**{**candidate.model_dump(), 'execution_review': review})
         except UserProblem as exc:
             preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': str(exc)})
+        except ValidationError as exc:
+            fields = {part for error in exc.errors(include_input=False, include_url=False)
+                      for part in error.get('loc', ()) if isinstance(part, str)}
+            blocker = ('Параметр OffsetAdvancesDebtsAutomatically в историческом образце имеет неподдерживаемый формат.'
+                       if 'OffsetAdvancesDebtsAutomatically' in fields else
+                       'Учётные данные образца не прошли проверку для записи.')
+            preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': blocker})
         except ValueError:
             preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': 'Учётные данные образца не прошли проверку для записи.'})
         return BillingBasis(**{**basis.model_dump(), 'preview': preview,
