@@ -32,7 +32,7 @@ def preview_text(preview: InvoicePreview) -> str:
         parts.append(f"Подсказка из предыдущего счёта: {preview.previous_reference}. Цены проверены заново в 1С.")
     for i, line in enumerate(preview.lines, 1):
         parts.extend(("", f"{i}. Услуга: {line.description}", f"Количество: {quantity(line.quantity)} {line.uom}",
-            f"Цена без НДС: {money(line.price)} {preview.currency}",
+            f"Цена {'с НДС' if line.price_includes_tax else 'без НДС'}: {money(line.price)} {preview.currency}",
             f"Сумма без НДС: {money(line.subtotal)} {preview.currency}",
             f"Налог: {line.tax.label}; ставка {quantity(line.tax.rate)}%",
             f"НДС: {money(line.tax_amount)} {preview.currency}", f"Сумма строки: {money(line.total)} {preview.currency}"))
@@ -58,10 +58,13 @@ def historical_preview_text(preview: InvoicePreview) -> str:
         parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
     parts.extend((f"Договор: {source.contract_name}",
                   f"Образец: счёт №{source.source_number} от {source.source_date:%d.%m.%Y}"))
+    if preview.price_includes_tax:
+        parts.append("Цены образца включают НДС. Налог выделяется из суммы, а не добавляется сверху.")
+        parts.append("В правке «Цена» указывайте цену без НДС; цену с НДС пересчитаем и покажем в preview.")
     source_map = {item.source_id: item for item in source.sources}
     for i, line in enumerate(preview.lines, 1):
         parts.extend(("", f"{i}. {line.description}",
-            f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}",
+            f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}" + (" (с НДС)" if line.price_includes_tax else ""),
             f"Без НДС: {money(line.subtotal)}; НДС {quantity(line.tax.rate)}% ({line.tax.label}): {money(line.tax_amount)}",
             f"Сумма строки: {money(line.total)} {preview.currency}"))
         if len(source_map) > 1 and line.source_id in source_map:

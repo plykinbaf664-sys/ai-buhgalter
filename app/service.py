@@ -155,7 +155,7 @@ class InvoiceService:
                         raise UserProblem("Для услуги несколько исторических строк. Уточните строку суммы; объединять их нельзя.")
                     for index in indexes:
                         line = basis.preview.lines[index]
-                        if edit.amount is not None:
+                        if edit.amount is not None and not line.price_includes_tax:
                             unit = (edit.amount / line.quantity).quantize(Decimal('.01'), rounding=ROUND_HALF_UP)
                             if (unit * line.quantity).quantize(Decimal('.01'), rounding=ROUND_HALF_UP) != edit.amount:
                                 raise InitialQuantityRequired(edit.line_number, edit.amount, line.quantity, line.uom)

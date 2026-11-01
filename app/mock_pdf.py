@@ -62,7 +62,7 @@ def render_mock_pdf(preview: InvoicePreview) -> PdfDocument:
                                f"SWIFT: {preview.bank.swift}", f"Beneficiary: {preview.bank.beneficiary}"]),
         block("Payment and Delivery Terms", [f"Payment Terms: {preview.terms.payment}",
                                              f"Delivery Terms: {preview.terms.delivery}"])), Spacer(1, 18)])
-    headers = ("No.", "Description", "Quantity", "UOM", "Price Excl. VAT", "Amount Excl. VAT", "VAT %",
+    headers = ("No.", "Description", "Quantity", "UOM", "Price Incl. VAT" if preview.price_includes_tax else "Price Excl. VAT", "Amount Excl. VAT", "VAT %",
                "VAT Amount", "Amount Incl. VAT")
     rows = [[p(h, small) for h in headers]]
     for i, line in enumerate(preview.lines, 1):

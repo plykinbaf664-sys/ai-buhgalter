@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
 
 class StrictModel(BaseModel):
@@ -179,6 +179,16 @@ class HistoricalProposal(StrictModel):
         return self
 
 
+def invoice_line_amounts(quantity: Decimal, price: Decimal, rate: Decimal,
+                         price_includes_tax: bool = False) -> tuple[Decimal, Decimal, Decimal]:
+    priced = (quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    if price_includes_tax:
+        tax = (priced * rate / (100 + rate)).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        return priced - tax, tax, priced
+    tax = (priced * rate / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+    return priced, tax, priced + tax
+
+
 class InvoiceLine(StrictModel):
     service_id: Label
     description: Label
@@ -191,31 +201,52 @@ class InvoiceLine(StrictModel):
     total: Money
     source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
     source_id: Label | None = None
+    price_includes_tax: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_pricing_mode(self, handler):
+        data = handler(self)
+        # Preserve exact JSON/digests of previously confirmed exclusive snapshots.
+        if not self.price_includes_tax:
+            data.pop("price_includes_tax", None)
+        return data
 
     @model_validator(mode="after")
     def correct_totals(self):
-        # Validation of provider arithmetic, not an alternative rendering calculation.
-        subtotal = (self.quantity * self.price).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        tax = (subtotal * self.tax.rate / 100).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        if (self.subtotal, self.tax_amount, self.total) != (subtotal, tax, subtotal + tax):
+        expected = invoice_line_amounts(self.quantity, self.price, self.tax.rate, self.price_includes_tax)
+        if (self.subtotal, self.tax_amount, self.total) != expected:
             raise ValueError("Inconsistent invoice line amounts")
         return self
+
+    def matches_net_price(self, net_price: Decimal) -> bool:
+        if not self.price_includes_tax:
+            return self.price == net_price
+        gross_unit = (net_price * (100 + self.tax.rate) / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        return (self.price == gross_unit and (self.subtotal, self.tax_amount, self.total) ==
+                invoice_line_amounts(self.quantity, net_price, self.tax.rate))
 
     def overridden(self, edit: PreviewLineOverride, tax: TaxProfile | None = None):
         if edit.tax is not None and (tax is None or not tax_matches(edit.tax, tax)):
             raise UserProblem("Налоговая правка не подтверждена профилем 1С.")
-        price = self.price if edit.price is None else edit.price
-        if edit.amount is not None:
-            price = (edit.amount / self.quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
-            if (price * self.quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) != edit.amount:
-                raise UserProblem("Сумма строки не представима с этим количеством и ценой до копейки. Уточните количество или сумму.")
         profile = tax or self.tax
-        subtotal = (self.quantity * price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
-        amount = (subtotal * profile.rate / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        price, target = self.price, None
+        if edit.price is not None:
+            price = edit.price
+            if self.price_includes_tax:
+                price = (edit.price * (100 + profile.rate) / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+                target = invoice_line_amounts(self.quantity, edit.price, profile.rate)
+        if edit.amount is not None:
+            target = invoice_line_amounts(Decimal(1), edit.amount, profile.rate)
+            priced = target[2] if self.price_includes_tax else target[0]
+            price = (priced / self.quantity).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+        amounts = invoice_line_amounts(self.quantity, price, profile.rate, self.price_includes_tax)
+        if target is not None and amounts != target:
+            raise UserProblem("Сумма без НДС не представима с этим количеством и ценой до копейки. "
+                              "Уточните количество или сумму; округление итогов не подменяем.")
         try:
             return InvoiceLine(**{**self.model_dump(), "price": price, "tax": profile,
                 "description": edit.description if edit.description is not None else self.description,
-                "subtotal": subtotal, "tax_amount": amount, "total": subtotal + amount})
+                "subtotal": amounts[0], "tax_amount": amounts[1], "total": amounts[2]})
         except ValueError:
             raise UserProblem("Изменённая цена или налог дают недопустимую сумму. Проверьте строку.") from None
 
@@ -267,6 +298,8 @@ class InvoicePreview(StrictModel):
             known_sources = {source.source_id for source in self.historical_proposal.sources}
             if any(line.source_id not in known_sources for line in self.lines):
                 raise ValueError("Line source is outside the historical source set")
+        if len({line.price_includes_tax for line in self.lines}) != 1:
+            raise ValueError("Mixed document VAT pricing modes")
         if len({e.line_number for e in self.user_overrides}) != len(self.user_overrides):
             raise ValueError("Duplicate manual row override")
         for edit in self.user_overrides:
@@ -275,7 +308,7 @@ class InvoicePreview(StrictModel):
             line = self.lines[edit.line_number - 1]
             if edit.currency is not None and edit.currency != self.currency:
                 raise ValueError("User amount currency mismatch")
-            if (edit.price is not None and edit.price != line.price
+            if (edit.price is not None and not line.matches_net_price(edit.price)
                     or edit.amount is not None and edit.amount != line.subtotal
                     or edit.description is not None and edit.description != line.description
                     or edit.tax is not None and not tax_matches(edit.tax, line.tax)):
@@ -292,6 +325,10 @@ class InvoicePreview(StrictModel):
         ):
             raise ValueError("Inconsistent invoice totals")
         return self
+
+    @property
+    def price_includes_tax(self) -> bool:
+        return self.lines[0].price_includes_tax
 
     @property
     def digest(self) -> str:

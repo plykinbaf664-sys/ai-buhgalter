@@ -48,6 +48,7 @@ Live smoke does not auto-load `.env.local`; use the explicit loader in [READONLY
 | Domain/basis/revision/execute/reconcile | `test_core.py`, `test_onec_contract.py`, `test_boundaries.py` |
 | Language/typed intent/financial grounding/model selection | `test_ai.py`, `test_language.py`, `test_intent.py`, `test_model_selection.py` |
 | FirstBit transport/schema/history/arithmetic/isolation | `test_firstbit.py`, `test_firstbit_application.py` |
+| VAT-inclusive/exclusive source prices, net edits, exact rounding, legacy digest compatibility and linked Tax Invoice recovery | `test_vat_inclusive.py` |
 | Company normalization/partial/fuzzy/paging and expiring selection | `test_company_search.py`, `test_client_choice.py` |
 | Initial net amounts, service choice, repeated/multi-source history, quantity approval | `test_initial_lines.py` |
 | Existing-preview amount/price/VAT/description edits and source drift | `test_preview_overrides.py` |

@@ -14,6 +14,7 @@ from xml.etree import ElementTree as ET
 import httpx
 from pydantic import Field, SecretStr, field_validator, model_validator
 
+from app.domain import invoice_line_amounts
 from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCandidates, ClientChoiceRequired, ExternalModel,
                         HistoricalProposal, InvoiceLine, InvoicePreview, Label, Money,
                         OperationState, PartyDetails, Quantity,
@@ -515,7 +516,7 @@ class FirstBit:
             raise UserProblem("Нашёл несколько счетов с этой услугой на одно время. Нельзя однозначно выбрать образец.")
         return source
 
-    async def _line(self, row, item, *, quantity=None,
+    async def _line(self, row, item, *, quantity=None, price_includes_tax=False,
                     vats: dict[UUID, VAT], uoms: dict[tuple[str, UUID], NamedRecord]):
         if (row.DiscountMarkupRate or row.DiscountMarkupAmount
                 or row.AutomaticDiscountRate or row.AutomaticDiscountAmount):
@@ -537,12 +538,13 @@ class FirstBit:
         # Verify historical values BEFORE any human quantity edit. Never repair a bad source.
         line = InvoiceLine(service_id=str(item.Ref_Key), description=row.Content or item.Description,
             quantity=row.Quantity, uom=uom.Description, price=row.Price, tax=tax,
-            subtotal=row.Amount, tax_amount=row.VATAmount, total=row.AmountTotal, source_line_number=row.LineNumber)
+            subtotal=row.Amount - row.VATAmount if price_includes_tax else row.Amount,
+            tax_amount=row.VATAmount, total=row.AmountTotal, source_line_number=row.LineNumber,
+            price_includes_tax=price_includes_tax)
         if quantity is not None and quantity != line.quantity:
-            subtotal = (quantity * line.price).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
-            amount = (subtotal * tax.rate / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP)
+            subtotal, amount, total = invoice_line_amounts(quantity, line.price, tax.rate, price_includes_tax)
             line = InvoiceLine(**{**line.model_dump(), "quantity": quantity,
-                "subtotal": subtotal, "tax_amount": amount, "total": subtotal + amount})
+                "subtotal": subtotal, "tax_amount": amount, "total": total})
         return line
 
     def _tax_profile(self, vat):
@@ -607,8 +609,6 @@ class FirstBit:
             raise UserProblem("Исторический образец изменился. Подготовьте новый preview перед ручными правками.")
         if source.DocumentCurrency_Key != contract.AccountsCurrency_Key:
             raise UserProblem("Валюта исторического счёта отличается от договора. Нельзя безопасно подготовить preview.")
-        if source.AmountVATIn:
-            raise UserProblem("Исторический счёт содержит цены с включённым НДС. Такая арифметика пока заблокирована.")
         if sum((r.AmountTotal for r in source.Inventory), Decimal(0)) != source.DocumentAmount:
             raise UserProblem("Сумма исторического документа не совпадает со строками.")
         rows = sorted((r for r in source.Inventory if r.Item_Key == item.Ref_Key), key=lambda r: r.LineNumber)
@@ -624,7 +624,7 @@ class FirstBit:
         vats: dict[UUID, VAT] = {}
         uoms: dict[tuple[str, UUID], NamedRecord] = {}
         lines = tuple([await self._line(row, item, quantity=(selections[i].quantity
-            if selections and not expand else None), vats=vats, uoms=uoms) for i, row in enumerate(rows)])
+            if selections and not expand else None), price_includes_tax=source.AmountVATIn, vats=vats, uoms=uoms) for i, row in enumerate(rows)])
         if len({e.line_number for e in command.preview_overrides}) != len(command.preview_overrides):
             raise UserProblem("Для строки заданы противоречивые ручные правки.")
         edited_lines = list(lines)
@@ -667,12 +667,15 @@ class FirstBit:
         if command.preview_overrides and command.preview_source_id != str(primary.Ref_Key):
             raise UserProblem("Основной исторический образец изменился. Подготовьте новый preview.")
         for source in sources:
-            if source.DocumentCurrency_Key != contract.AccountsCurrency_Key or source.AmountVATIn:
+            if source.DocumentCurrency_Key != contract.AccountsCurrency_Key:
                 raise UserProblem("Валюта или арифметика исторического источника не поддерживается. Preview остановлен.")
             if sum((r.AmountTotal for r in source.Inventory), Decimal(0)) != source.DocumentAmount:
                 raise UserProblem("Сумма исторического документа не совпадает со строками.")
             if len({r.LineNumber for r in source.Inventory}) != len(source.Inventory):
                 raise BackendFailure("firstbit_duplicate_line")
+        if len({source.AmountVATIn for source in sources}) != 1:
+            raise UserProblem("У исторических образцов разные режимы цены: с НДС и без НДС. "
+                              "Нужен единый подтверждённый образец; автоматически их не смешиваем.")
         lines, used = [], {}
         vats, uoms = {}, {}
         for selection in command.services:
@@ -690,7 +693,7 @@ class FirstBit:
             else:
                 raise UserProblem("Для услуги найдено несколько исторических строк. Уточните состав; строки не объединяем.")
             for row in selected_rows:
-                line = await self._line(row, item, quantity=selection.quantity, vats=vats, uoms=uoms)
+                line = await self._line(row, item, quantity=selection.quantity, price_includes_tax=source.AmountVATIn, vats=vats, uoms=uoms)
                 lines.append(InvoiceLine(**{**line.model_dump(), "source_id": str(source.Ref_Key)}))
         edits = {e.line_number: e for e in command.preview_overrides}
         if len(lines) > 20:
