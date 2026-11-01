@@ -53,11 +53,13 @@ class WriteLine(HistoricalLine):
     ExpenseItem_Key: UUID
     IncomeItem_Key: UUID
     TradeDiscountsGLAccount_GL_Key: UUID
-    ConnectionKey: int = Field(ge=1, le=2**63-1)
+    ConnectionKey: int = Field(ge=-(2**63), le=2**63-1)
 
     @field_validator('ConnectionKey', mode='before')
     @classmethod
     def connection_int64(cls, value):
+        if isinstance(value, str) and re.fullmatch(r'-[0-9]+', value):
+            return int(value)
         if isinstance(value, str) and value.isascii() and value.isdigit():
             return int(value)
         return value
@@ -339,8 +341,10 @@ class FirstBitWrite(FirstBit):
             return value
 
         for source in sources.values():
+            if source.AmountVATIn != preview.price_includes_tax:
+                raise UserProblem('Режим цены исторического образца изменился. Подготовьте новый preview.')
             if (str(source.Company_Key) != client_id or str(source.Contract_Key) != history.contract_id
-                    or str(source.Entity_Key) != history.entity_id or source.AmountVATIn
+                    or str(source.Entity_Key) != history.entity_id
                     or source.TransactionType != 'SaleToCustomer' or source.TaxationVAT != 'TaxableByVAT'
                     or source.TermsAndConditions or source.DeliveryTerms_Key != ZERO
                     or len(source.PaymentTermsStages) != 1):
@@ -410,7 +414,7 @@ class FirstBitWrite(FirstBit):
         result = {key: refs[key] for key in (*HEADER_REFS, *OPTIONAL_HEADER_REFS, 'DocumentCurrency_Key', 'AccountingCurrency_Key', 'NationalCurrency_Key')}
         result.update(Company_Key=UUID(client_id), Contract_Key=UUID(history.contract_id), Entity_Key=UUID(history.entity_id),
                       Date=datetime.combine(preview.invoice_date, time()), PriceDate=review.price_date,
-                      TransactionType='SaleToCustomer', TaxationVAT='TaxableByVAT', AmountVATIn=False,
+                      TransactionType='SaleToCustomer', TaxationVAT='TaxableByVAT', AmountVATIn=preview.price_includes_tax,
                       DocumentAmount=preview.total, ExchangeRate=Decimal(1), ExchangeRateAccCur=Decimal(1), FactorAccCur='1',
                       DeliveryTerms_Key=ZERO, TermsAndConditions='', Posted=False, DeletionMark=False)
         result.update({key: json.loads(raw_refs['header:'+key]) for key in HEADER_VALUES})
@@ -420,12 +424,16 @@ class FirstBitWrite(FirstBit):
             lines.append({**{key: refs[f'line:{index}:{key}'] for key in LINE_GL},
                 **{key: refs[f'line:{index}:{key}'] for key in LINE_REFS},
                 'ConnectionKey': raw_refs[f'line:{index}:ConnectionKey'], 'LineNumber': str(index), 'Item_Key': UUID(line.service_id), 'Content': line.description,
-                'Quantity': line.quantity, 'Price': line.price, 'Amount': line.subtotal, 'AmountTotal': line.total,
+                'Quantity': line.quantity, 'Price': line.price,
+                'Amount': line.total if line.price_includes_tax else line.subtotal, 'AmountTotal': line.total,
                 'VATAmount': line.tax_amount, 'VATRate_Key': UUID(line.tax.tax_id),
                 'UnitOfMeasure': refs[f'line:{index}:UnitOfMeasure'], 'UnitOfMeasure_Type': review.line_uom_types[index - 1],
                 'DiscountMarkupRate': Decimal(0), 'DiscountMarkupAmount': Decimal(0),
                 'AutomaticDiscountRate': Decimal(0), 'AutomaticDiscountAmount': Decimal(0)})
-        if len({row['ConnectionKey'] for row in lines}) != len(lines):
+        # Posted sources may have zero in every row: it is an unset linkage,
+        # not a row identity. Preserve those rows and keep nonzero links unique.
+        connection_keys = [row['ConnectionKey'] for row in lines if int(row['ConnectionKey']) != 0]
+        if len(set(connection_keys)) != len(connection_keys):
             raise InvoiceConflict()
         result['Inventory'] = lines
         result['PaymentTermsStages'] = [{'LineNumber': '1', 'Amount': preview.total, 'Percent': Decimal(100),
@@ -450,6 +458,8 @@ class FirstBitWrite(FirstBit):
                       for part in error.get('loc', ()) if isinstance(part, str)}
             blocker = ('Параметр OffsetAdvancesDebtsAutomatically в историческом образце имеет неподдерживаемый формат.'
                        if 'OffsetAdvancesDebtsAutomatically' in fields else
+                       'Ключ связи строки ConnectionKey в образце не является корректным Int64. Запись заблокирована.'
+                       if 'ConnectionKey' in fields else
                        'Учётные данные образца не прошли проверку для записи.')
             preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': blocker})
         except ValueError:

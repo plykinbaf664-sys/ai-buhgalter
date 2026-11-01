@@ -65,7 +65,7 @@ def tax_record(fixture,prepared):
             'Content':row['Content'],'Quantity':row['Quantity'],'Price':row['Price'],'PriceCur':row['Price'],
             'Amount':row['Amount'],'AmountCur':row['Amount'],'AmountTotal':row['AmountTotal'],
             'AmountTotalCur':row['AmountTotal'],'VATAmount':row['VATAmount'],'VATAmountCur':row['VATAmount'],
-            'VATRate_Key':row['VATRate_Key'],'AmountVATIn':False,'UnitOfMeasure':row['UnitOfMeasure'],
+            'VATRate_Key':row['VATRate_Key'],'AmountVATIn':doc['AmountVATIn'],'UnitOfMeasure':row['UnitOfMeasure'],
             'UnitOfMeasure_Type':row['UnitOfMeasure_Type'],'ExchangeRate':1,'DiscountMarkupAmount':0,'AutomaticDiscountAmount':0})
     return record
 

@@ -254,10 +254,11 @@ def validate_tax_record(record: TaxRecord, basis, source, *, supplier_tax_number
             or actual.Item!=UUID(expected.service_id) or actual.Contract_Key!=record.Contract_Key
             or actual.Content!=expected.description or actual.Quantity!=expected.quantity
             or actual.Price!=expected.price or actual.PriceCur!=expected.price
-            or actual.Amount!=expected.subtotal or actual.AmountCur!=expected.subtotal
+            or actual.Amount!=(expected.total if expected.price_includes_tax else expected.subtotal)
+            or actual.AmountCur!=(expected.total if expected.price_includes_tax else expected.subtotal)
             or actual.AmountTotal!=expected.total or actual.AmountTotalCur!=expected.total
             or actual.VATAmount!=expected.tax_amount or actual.VATAmountCur!=expected.tax_amount
-            or actual.VATRate_Key!=UUID(expected.tax.tax_id) or actual.AmountVATIn
+            or actual.VATRate_Key!=UUID(expected.tax.tax_id) or actual.AmountVATIn!=expected.price_includes_tax
             or actual.ExchangeRate!=1 or actual.DiscountMarkupAmount or actual.AutomaticDiscountAmount
             or actual.UnitOfMeasure!=UUID(refs[f'line:{index}:UnitOfMeasure'])
             or actual.UnitOfMeasure_Type!=preview.execution_review.line_uom_types[index-1]):
