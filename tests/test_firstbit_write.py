@@ -560,3 +560,64 @@ def test_historical_issuer_conflict_is_explicit_and_never_silently_uses_contract
             assert fixture.posts==0
         finally:await backend.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('expected', ['Yes', 'No'])
+def test_reviewed_yesno_debt_offset_policy_survives_payload_and_readback(tmp_path, expected):
+    from app.presentation import preview_text
+    fixture = WriteFixture()
+    fixture.records['Document_InventoryExpense'][0]['OffsetAdvancesDebtsAutomatically'] = expected
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            prepared = await prepare(backend)
+            assert prepared.preview.execution_review is not None
+            assert prepared.preview.write_blocker is None
+            references = {item.role: item.reference_id
+                          for item in prepared.preview.execution_review.references}
+            assert references['header:OffsetAdvancesDebtsAutomatically'] == json.dumps(expected)
+            text = preview_text(prepared.preview)
+            assert ('автоматически, как в образце' if expected == 'Yes' else 'отключён, как в образце') in text
+            assert 'PDF пока заблокированы' not in text
+            assert backend._frozen_payload(prepared.basis)['OffsetAdvancesDebtsAutomatically'] == expected
+            result = await InvoiceService(backend, journal=backend.journal,
+                allow_real_writes=True).execute(prepared, 'synthetic-confirm', 123)
+            assert not result.invoice.posted and fixture.posts == 1
+            assert fixture.created[0]['OffsetAdvancesDebtsAutomatically'] == expected
+            fixture.created[0]['OffsetAdvancesDebtsAutomatically'] = 'No' if expected == 'Yes' else 'Yes'
+            with pytest.raises(InvoiceConflict):
+                await backend.read_operation(prepared.basis, prepared.operation_id)
+        finally:
+            await backend.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('value', ['', 'SyntheticUnsupportedPolicy', 'yes', 'invalid\nvalue', None, True])
+def test_unknown_debt_offset_policy_blocks_write_with_precise_safe_reason(tmp_path, value):
+    from app.bot import Bot
+    fixture = WriteFixture()
+    fixture.records['Document_InventoryExpense'][0]['OffsetAdvancesDebtsAutomatically'] = value
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            service = InvoiceService(backend, journal=backend.journal, allow_real_writes=True)
+            prepared = await prepare(backend)
+            assert prepared.preview.execution_review is None
+            assert 'OffsetAdvancesDebtsAutomatically' in prepared.preview.write_blocker
+            bot = Bot(service, None, None)
+            prompt = bot.show_preview(123, prepared, InvoiceCommand(
+                client='ООО Синтетика', invoice_date=date(2026, 9, 1)))
+            assert 'READ-ONLY' not in prompt.text
+            result = await bot.confirm(123, bot.pending[123], 'synthetic-blocked-confirm')
+            assert 'OffsetAdvancesDebtsAutomatically' in result
+            assert 'READ-ONLY' not in result
+            if value == 'SyntheticUnsupportedPolicy':
+                assert value not in result
+            assert fixture.posts == 0
+        finally:
+            await backend.aclose()
+
+    asyncio.run(scenario())

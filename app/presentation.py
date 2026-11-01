@@ -89,10 +89,15 @@ def historical_preview_text(preview: InvoicePreview) -> str:
         for item in review.references:
             pieces = item.role.split(':')
             role = pieces[-1]
+            if item.role == 'header:OffsetAdvancesDebtsAutomatically':
+                if item.reference_id == '"Yes"':
+                    parts.append('Зачёт авансов и задолженности: автоматически, как в образце.')
+                elif item.reference_id == '"No"':
+                    parts.append('Автоматический зачёт авансов и задолженности: отключён, как в образце.')
             if role in roles:
                 prefix = f'Строка {pieces[1]}, ' if len(pieces) == 3 else ''
                 parts.append(f'{prefix}{roles[role]}: {item.label}')
-        parts.append('Подтверждение создаст один ЧЕРНОВИК в 1С. Автоматическое проведение и штатный PDF пока заблокированы.')
+        parts.append('Проверьте перенесённые учётные реквизиты перед подтверждением.')
     else:
         parts.extend((preview.write_blocker or 'Для записи ещё нужны проверенные реквизиты, условия и дата оказания услуги.',
                       'Можно изменить запрос текстом/голосом, проверить preview или отменить.'))
