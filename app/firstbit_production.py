@@ -28,6 +28,7 @@ class FirstBitProduction(FirstBitWrite):
     posting_enabled=True
     native_pdf_available=True
     requires_tax_invoice=True
+    generation_send_claimed_at_dispatch=True
 
     def __init__(self,settings,*,journal,schema_sha256,ui,transport=None):
         if ui is None:raise WritesDisabled()
@@ -138,8 +139,10 @@ class FirstBitProduction(FirstBitWrite):
             if registration.TRNVAT!=basis.preview.issuer.tax_number:raise InvoiceConflict()
             if await self._remote(basis,operation_id)!=source:raise InvoiceConflict()
             if await find_tax_record(self,basis,source) is not None:raise InvoiceConflict()
+        async def before_send():
             self.journal.claim_provider_request(operation_id,'generate_tax')
-        await self.ui.generate_tax_invoice(UUID(source.document_id),source.number,before_action)
+        await self.ui.generate_tax_invoice(UUID(source.document_id),source.number,before_action,
+                                           before_send=before_send)
         created=None
         for attempt in range(12):
             created=await find_tax_record(self,basis,source)

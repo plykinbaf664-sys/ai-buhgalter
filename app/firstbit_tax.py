@@ -271,7 +271,10 @@ async def read_tax_operation(adapter, basis, source, operation_id) -> TaxOperati
     record=await find_tax_record(adapter,basis,source)
     if record is None:
         stored=adapter.journal.get(operation_id)
-        status='unknown' if stored is not None and stored.tax is not None else 'not_started'
+        pending = stored is not None and stored.tax is not None
+        unsent = (getattr(adapter, 'generation_send_claimed_at_dispatch', False) is True
+                  and adapter.journal.tax_generation_unsubmitted(operation_id))
+        status='unknown' if pending and not unsent else 'not_started'
         return TaxOperationState(operation_id=operation_id,source_document_id=source.document_id,status=status)
     invoice=TaxInvoice(document_id=str(record.Ref_Key),source_document_id=source.document_id,number=record.Number,
         posted=record.Posted,client_id=basis.client_id,basis_key=basis.key,revision=record.DataVersion,

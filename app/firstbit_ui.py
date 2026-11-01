@@ -35,6 +35,28 @@ def native_method_name(raw: str) -> str | None:
     return match.group(1) if match else None
 
 
+def native_session_rejected(payload: bytes) -> bool:
+    """Recognize only the platform's pre-application session rejection."""
+    import json
+    try:
+        node = json.loads(payload).get('exception')
+        if not isinstance(node, dict) or not node.get('descr', '').startswith('Session error'):
+            return False
+        for _ in range(6):
+            kind = node.get('#inner')
+            inner = node.get('inner')
+            if not isinstance(inner, dict):
+                return False
+            if (kind == '{http://v8.1c.ru/8.2/managed-application/seancecontextexception}SeanceContextException'
+                    and inner.get('reason') == 1
+                    and inner.get('descr', '').startswith('Session is not available or has been dropped')):
+                return True
+            node = inner
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return False
+
+
 class FirstBitUI:
     def __init__(self,settings,*,private_root:Path):
         self.settings=settings
@@ -47,6 +69,7 @@ class FirstBitUI:
         self._lock=asyncio.Lock()
         self._pw=self._context=self._page=None
         self._profile=None
+        self._profile_tmp=None
         self._trace=[]
         self._capture_native_print=False
         self._login_submitted=False
@@ -55,6 +78,9 @@ class FirstBitUI:
         self._last_command=0.0
         self._session_failed=False
         self._generate_ack=None
+        self._generate_dispatched=False
+        self._generate_preflight_failed=False
+        self._generate_dispatch_error=None
         self._generate_event=asyncio.Event()
 
     async def _launch(self,link):
@@ -62,10 +88,11 @@ class FirstBitUI:
         self._session_failed=False
         from playwright.async_api import async_playwright
         self._pw=await async_playwright().start()
-        self._profile=self.root/'profile'
-        self._profile.mkdir(mode=0o700,exist_ok=True)
+        import tempfile
+        self._profile_tmp=tempfile.TemporaryDirectory(prefix='session-',dir=self.root)
+        self._profile=Path(self._profile_tmp.name)
         self._context=await self._pw.chromium.launch_persistent_context(str(self._profile),
-            headless=True,channel='chromium',chromium_sandbox=True,accept_downloads=True)
+            headless=True,channel='chromium',chromium_sandbox=True,accept_downloads=True,service_workers="block")
         self._page=self._context.pages[0]
         self._page.set_default_timeout(25000)
         def native_command(request):
@@ -91,6 +118,11 @@ class FirstBitUI:
                 receipt.write_text(__import__('json').dumps({'method':method_name,'http_status':response.status,'at':time.time()}))
                 receipt.chmod(0o600)
                 self._generate_event.set()
+            if (method_name == 'CheckBasisBeforeFilling' and self._capture_native_print
+                    and response.status >= 400 and not self._generate_dispatched):
+                if native_session_rejected(await response.body()):
+                    self._generate_preflight_failed = True
+                    self._generate_event.set()
             if path.endswith('/login'):
                 self._trace.append({'at':round(time.monotonic(),3),'status':response.status,'resource':'login','submitted':self._login_submitted})
             if self._capture_native_print and response.request.method=='POST' and any(part in path for part in ('/forms/','/modules/')):
@@ -216,31 +248,72 @@ class FirstBitUI:
             await control.click()
             await page.wait_for_timeout(500)
 
-    async def generate_tax_invoice(self,reference,number,before_action):
-        if not callable(before_action):raise BackendFailure('firstbit_ui_missing_write_guard')
+    async def generate_tax_invoice(self,reference,number,before_action,*,before_send):
+        if not callable(before_action) or not callable(before_send):
+            raise BackendFailure('firstbit_ui_missing_write_guard')
         async with self._lock:
-            page=await self._open_document('InventoryExpense',reference,number)
-            await self._assert_reference('InventoryExpense',reference)
-            await self._wait_commands()
-            # This is the observed FirstBit action matching the captured
-            # GenerateTaxInvoice server function. Generic Create Based On opens
-            # a different filling path and is not an admitted substitute.
-            control=page.locator('[id$="_GenerateTaxInvoice"]:visible > a')
-            await control.wait_for(state='visible')
-            self._verified_document=None
-            self._generate_event.clear()
-            self._generate_ack=None
-            await before_action()
-            self._capture_native_print=True
-            try:
-                await control.click()
-                try:await asyncio.wait_for(self._generate_event.wait(),timeout=35)
-                except asyncio.TimeoutError:
-                    raise BackendFailure('firstbit_ui_generate_not_acknowledged') from None
-                if self._generate_ack!=200:
-                    raise BackendFailure('firstbit_ui_generate_not_acknowledged')
-                await self._wait_commands()
-            finally:self._capture_native_print=False
+            for attempt in range(2):
+                # OData verification must finish before opening a fresh native
+                # session. A previous session can be invalidated by read-back.
+                await self.aclose()
+                await before_action()
+                page=await self._open_document('InventoryExpense',reference,number)
+                try:
+                    await self._assert_reference('InventoryExpense',reference)
+                    await self._wait_commands()
+                    control=page.locator('[id$="_GenerateTaxInvoice"]:visible > a')
+                    await control.wait_for(state='visible')
+                    self._verified_document=None
+                    self._generate_event.clear()
+                    self._generate_ack=None
+                    self._generate_dispatched=False
+                    self._generate_preflight_failed=False
+                    self._generate_dispatch_error=None
+
+                    async def dispatch(route):
+                        request=route.request
+                        if (request.method != 'POST' or
+                                native_method_name(request.post_data or '') != 'GenerateTaxInvoice'):
+                            await route.continue_()
+                            return
+                        if self._generate_dispatched or self._generate_preflight_failed:
+                            await route.abort()
+                            return
+                        try:
+                            # The last durable claim gates the actual financial
+                            # RPC, not its read-only CheckBasisBeforeFilling.
+                            await before_send()
+                            self._generate_dispatched=True
+                        except Exception as error:
+                            self._generate_dispatch_error=error
+                            self._generate_event.set()
+                            await route.abort()
+                            return
+                        await route.continue_()
+
+                    await page.route('**/*',dispatch)
+                    self._capture_native_print=True
+                    await control.click()
+                    try:
+                        await asyncio.wait_for(self._generate_event.wait(),timeout=35)
+                    except asyncio.TimeoutError:
+                        code=('firstbit_ui_generate_not_acknowledged' if self._generate_dispatched
+                              else 'firstbit_ui_generate_not_submitted')
+                        raise BackendFailure(code) from None
+                    if self._generate_dispatch_error is not None:
+                        raise self._generate_dispatch_error
+                    if self._generate_preflight_failed and not self._generate_dispatched:
+                        if not attempt:
+                            continue
+                        raise BackendFailure('firstbit_ui_session_unavailable')
+                    if self._generate_ack != 200 or not self._generate_dispatched:
+                        raise BackendFailure('firstbit_ui_generate_not_acknowledged')
+                    return
+                finally:
+                    self._capture_native_print=False
+                    # Keep the dispatch gate until every pending browser task is
+                    # cancelled, including delayed preflight callbacks.
+                    await self.aclose()
 
     async def print_tax_invoice(self,reference,number,before_action):
         from playwright.async_api import TimeoutError as BrowserTimeout
@@ -256,9 +329,10 @@ class FirstBitUI:
 
     async def _print_once(self,reference,number,before_action):
         if not callable(before_action):raise BackendFailure('firstbit_ui_missing_write_guard')
+        await self.aclose()
+        await before_action()
         page=await self._open_document('TaxInvoice',reference,number)
         await self._assert_reference('TaxInvoice',reference)
-        await before_action()
         await self._wait_commands()
         await page.locator('[id$="_PrintSubmenu"]:visible').click()
         await page.get_by_text('Tax Invoice (EN, landscape)',exact=True).filter(visible=True).click()
@@ -325,9 +399,20 @@ class FirstBitUI:
 
     async def aclose(self):
         try:
-            if self._context is not None:await self._context.close()
+            if self._context is not None:
+                await self._context.close()
         finally:
             self._context=self._page=None
             self._verified_document=None
-            if self._pw is not None:
-                await self._pw.stop();self._pw=None
+            try:
+                if self._pw is not None:
+                    await self._pw.stop()
+            finally:
+                self._pw=None
+                temporary=getattr(self,'_profile_tmp',None)
+                if temporary is not None:
+                    try:
+                        temporary.cleanup()
+                    finally:
+                        self._profile_tmp=None
+                        self._profile=None
