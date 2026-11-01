@@ -1,0 +1,33 @@
+# Import inside the existing HTTPS site's block. Other routes remain unchanged.
+handle /ai-buhgalteria/* {
+@ai_buhgalteria_health {
+    method GET
+    path /ai-buhgalteria/healthz
+}
+handle @ai_buhgalteria_health {
+    uri strip_prefix /ai-buhgalteria
+    header Cache-Control "no-store"
+    reverse_proxy 127.0.0.1:8107
+}
+@ai_buhgalteria_webhook {
+    method POST
+    path /ai-buhgalteria/telegram/webhook
+}
+handle @ai_buhgalteria_webhook {
+    request_body {
+        max_size 32KB
+    }
+    uri strip_prefix /ai-buhgalteria
+    header Cache-Control "no-store"
+    reverse_proxy 127.0.0.1:8107 {
+        transport http {
+            dial_timeout 3s
+            response_header_timeout 120s
+        }
+    }
+}
+# Do not expose any other project paths or files.
+handle {
+    respond 404
+}
+}

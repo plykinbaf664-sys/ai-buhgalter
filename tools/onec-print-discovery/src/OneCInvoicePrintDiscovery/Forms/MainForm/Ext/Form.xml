@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Form xmlns="http://v8.1c.ru/8.3/xcf/logform" xmlns:cfg="http://v8.1c.ru/8.1/data/enterprise/current-config" xmlns:v8="http://v8.1c.ru/8.1/data/core" xmlns:xs="http://www.w3.org/2001/XMLSchema" version="2.14">
+  <Title><v8:item><v8:lang>en</v8:lang><v8:content>Invoice print discovery - READ ONLY</v8:content></v8:item></Title><AutoTitle>false</AutoTitle>
+  <AutoCommandBar name="FormCommandBar" id="-1"><Autofill>false</Autofill></AutoCommandBar>
+  <Events><Event name="OnOpen">OnOpen</Event></Events>
+  <ChildItems>
+    <Button name="ExportButton" id="1"><Type>UsualButton</Type><CommandName>Form.Command.Export</CommandName><ExtendedTooltip name="ExportButtonTooltip" id="101"/></Button>
+    <InputField name="StatusField" id="2"><DataPath>StatusText</DataPath><ReadOnly>true</ReadOnly><MultiLine>true</MultiLine><ContextMenu name="StatusMenu" id="102"/><ExtendedTooltip name="StatusTooltip" id="103"/></InputField>
+    <InputField name="OutputField" id="3"><DataPath>OutputJSON</DataPath><ReadOnly>true</ReadOnly><MultiLine>true</MultiLine><Height>25</Height><ContextMenu name="OutputMenu" id="104"/><ExtendedTooltip name="OutputTooltip" id="105"/></InputField>
+  </ChildItems>
+  <Attributes>
+    <Attribute name="Object" id="1"><Type><v8:Type>cfg:ExternalDataProcessorObject.OneCInvoicePrintDiscovery</v8:Type></Type><MainAttribute>true</MainAttribute></Attribute>
+    <Attribute name="OutputJSON" id="2"><Type><v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>0</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers></Type></Attribute>
+    <Attribute name="StatusText" id="3"><Type><v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>0</v8:Length><v8:AllowedLength>Variable</v8:AllowedLength></v8:StringQualifiers></Type></Attribute>
+  </Attributes>
+  <Commands><Command name="Export" id="1"><Title><v8:item><v8:lang>en</v8:lang><v8:content>Export print metadata (READ ONLY)</v8:content></v8:item></Title><Action>CommandExport</Action><CurrentRowUse>DontUse</CurrentRowUse></Command></Commands>
+</Form>
