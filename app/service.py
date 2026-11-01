@@ -295,7 +295,8 @@ class InvoiceService:
             if state.status == 'not_started':
                 stage = 'tax_generate'
                 self._write_guard()
-                self.journal.claim_tax_generation(operation_id)
+                self.journal.claim_tax_generation(operation_id, allow_unsubmitted=(
+                    getattr(self.onec, 'generation_send_claimed_at_dispatch', False) is True))
                 event(request_id=request_id, user_id=user_id, stage=stage, status='started',
                       operation_id=operation_id, document_id=source.document_id)
                 reference = TaxInvoiceReference.model_validate(await asyncio.wait_for(

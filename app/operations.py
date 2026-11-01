@@ -279,9 +279,26 @@ class OperationJournal:
             if cursor.rowcount != 1:
                 raise MutationUncertain()
 
-    def claim_tax_generation(self, operation_id: str) -> None:
+    @staticmethod
+    def _tax_generation_unsubmitted(db, stored) -> bool:
+        return bool(stored is not None and stored.invoice is not None and stored.invoice.posted
+            and stored.tax is not None and stored.tax.phase == 'generation_started'
+            and stored.tax.invoice is None and stored.tax.returned_reference is None
+            and stored.pdf is None
+            and db.execute("SELECT 1 FROM provider_requests WHERE operation_id=? AND stage='generate_tax'",
+                           (stored.prepared.operation_id,)).fetchone() is None)
+
+    def tax_generation_unsubmitted(self, operation_id: str) -> bool:
+        with self._connection() as db:
+            return self._tax_generation_unsubmitted(db, self._load(db, operation_id))
+
+    def claim_tax_generation(self, operation_id: str, *, allow_unsubmitted: bool = False) -> None:
+        if type(allow_unsubmitted) is not bool:
+            raise ValueError('Explicit dispatch capability required')
         with self._connection() as db:
             stored = self._load(db, operation_id)
+            if allow_unsubmitted and self._tax_generation_unsubmitted(db, stored):
+                return  # Preserve the original intent; the unique send claim is still absent.
             if (stored is None or stored.invoice is None or not stored.invoice.posted
                     or stored.tax is not None or stored.pdf is not None):
                 raise MutationUncertain()
