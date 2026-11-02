@@ -283,17 +283,33 @@ def test_race_after_refresh_is_still_atomically_blocked_and_repreviewed(workflow
     assert len(backend.documents) == 1
 
 
-def test_unknown_state_blocks_edit_and_retry_never_blindly_writes(workflow, monkeypatch):
+def test_unknown_state_allows_a_new_preview_but_never_a_second_confirmation(workflow, monkeypatch):
     send(workflow, TEXT, initial())
     async def unknown(basis, operation_id):
         return OperationState(operation_id=operation_id, status="unknown")
     monkeypatch.setattr(workflow[1], "read_operation", unknown)
     press(workflow, token(workflow))
-    assert "неизвестен" in prompt(workflow)["text"]
-    send(workflow, "Другой счёт", number=2)
-    assert "Сначала восстановите" in prompt(workflow)["text"]
-    send(workflow, "/retry", number=3)
+    bot = workflow[0].app.state.bot
+    frozen = bot.recoveries[123]
     assert not workflow[1].documents
+
+    # Repeating a request is safe up to preview, even while the prior confirmed operation is unknown.
+    send(workflow, TEXT, initial(), number=2)
+    assert preview(workflow).digest == frozen.preview.digest
+    assert bot.recoveries[123] == frozen
+    pending = bot.pending[123]
+    callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
+    assert f"invoice:confirm:{pending.token}" not in callbacks
+    assert any("invoice:edit:" in callback for callback in callbacks)
+    assert any("invoice:cancel:" in callback for callback in callbacks)
+
+    # Even a forged/direct confirmation remains guarded in the service path.
+    press(workflow, f"invoice:confirm:{pending.token}", 101)
+    assert not workflow[1].documents and bot.recoveries[123] == frozen
+    send(workflow, "/cancel", number=102)
+    assert 123 not in bot.pending and bot.recoveries[123] == frozen
+    send(workflow, "/retry", number=3)
+    assert not workflow[1].documents and bot.recoveries[123] == frozen
 
 
 @pytest.mark.parametrize("fault,state", [("create_lost_response", "draft"), ("post_lost_response", "posted")])
@@ -306,12 +322,16 @@ def test_timeout_after_real_fake_effect_recovers_same_confirmed_snapshot(workflo
     press(workflow, token(workflow))
     assert len(backend.documents) == 1
     frozen = workflow[0].app.state.bot.recoveries[123]
-    send(workflow, "Без НДС", number=2)
-    assert "Сначала восстановите" in prompt(workflow)["text"]
+    send(workflow, TEXT, initial(), number=2)
+    pending = workflow[0].app.state.bot.pending[123]
+    callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
+    assert f"invoice:confirm:{pending.token}" not in callbacks
+    assert workflow[0].app.state.bot.recoveries[123] == frozen
     send(workflow, "/retry", number=3)
     assert len(backend.documents) == 1
     assert next(iter(backend.documents.values())).preview_digest == confirmed.digest == frozen.preview.digest
     assert "1 050.00" in pdf_text(workflow)
+    assert 123 not in workflow[0].app.state.bot.pending
 
 
 @pytest.mark.parametrize("status", [401, 429, 500])
@@ -404,16 +424,20 @@ def test_repeated_request_and_different_data_never_duplicate_existing_document(w
     assert not workflow[0].app.state.bot.recoveries
 
 
-def test_refresh_lookup_timeout_is_unknown_and_blocks_new_writes(workflow, monkeypatch):
+def test_refresh_lookup_timeout_allows_preview_but_blocks_new_confirmation(workflow, monkeypatch):
     send(workflow, TEXT, initial())
     async def failed(*args):
         raise TimeoutError("PRIVATE")
     monkeypatch.setattr(workflow[1], "read_operation", failed)
     press(workflow, token(workflow))
-    assert "неизвестен" in prompt(workflow)["text"]
-    assert 123 in workflow[0].app.state.bot.recoveries
-    send(workflow, TEXT, number=2)
-    assert "Сначала восстановите" in prompt(workflow)["text"] and not workflow[1].documents
+    bot = workflow[0].app.state.bot
+    frozen = bot.recoveries[123]
+    send(workflow, TEXT, initial(), number=2)
+    assert bot.pending[123].prepared.preview.digest == frozen.preview.digest
+    callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
+    assert not any("invoice:confirm:" in callback for callback in callbacks)
+    assert bot.recoveries[123] == frozen and not workflow[1].documents
+
 
 
 def test_refresh_data_failure_preserves_pending_and_does_not_write(workflow, monkeypatch):
@@ -472,15 +496,20 @@ def test_failed_voice_edit_preserves_old_confirmation_and_keeps_context(workflow
     assert preview(workflow).invoice_date == date(2026, 10, 5)
 
 
-def test_unknown_operation_blocks_voice_before_stt(workflow, monkeypatch):
+def test_unknown_operation_allows_voice_preview_without_unblocking_confirmation(workflow, monkeypatch):
     send(workflow, TEXT, initial())
     async def unknown(basis, operation_id):
         return OperationState(operation_id=operation_id, status="unknown")
     monkeypatch.setattr(workflow[1], "read_operation", unknown)
     press(workflow, token(workflow))
-    count = len(workflow[5])
-    send(workflow, "Без НДС", number=2, voice=True)
-    assert len(workflow[5]) == count and not workflow[1].documents
+    bot = workflow[0].app.state.bot
+    frozen = bot.recoveries[123]
+    stt_calls = sum(request.url.path.endswith("transcriptions") for request in workflow[5])
+    send(workflow, TEXT, initial(), number=2, voice=True)
+    assert sum(request.url.path.endswith("transcriptions") for request in workflow[5]) == stt_calls + 1
+    assert bot.recoveries[123] == frozen and not workflow[1].documents
+    assert bot.pending[123].prepared.preview.digest == frozen.preview.digest
+
 
 
 def test_provider_supplied_period_is_visible_and_retained_during_edits(workflow, monkeypatch):

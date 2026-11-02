@@ -738,8 +738,10 @@ class FirstBit:
         entities = {str(source.Entity_Key) for source in unique_sources}
         if len(entities) != 1:
             raise UserProblem("Источники добавленных услуг относятся к разным поставщикам. Выберите другой исторический образец.")
+        if len({source.AmountVATIn for source in unique_sources}) != 1:
+            raise UserProblem("\u0423 \u0438\u0441\u0442\u043e\u0440\u0438\u0447\u0435\u0441\u043a\u0438\u0445 \u043e\u0431\u0440\u0430\u0437\u0446\u043e\u0432 \u0440\u0430\u0437\u043d\u044b\u0435 \u0440\u0435\u0436\u0438\u043c\u044b \u0446\u0435\u043d\u044b: \u0441 \u041d\u0414\u0421 \u0438 \u0431\u0435\u0437 \u041d\u0414\u0421. \u041d\u0443\u0436\u0435\u043d \u0435\u0434\u0438\u043d\u044b\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u044b\u0439 \u043e\u0431\u0440\u0430\u0437\u0435\u0446; \u0430\u0432\u0442\u043e\u043c\u0430\u0442\u0438\u0447\u0435\u0441\u043a\u0438 \u0438\u0445 \u043d\u0435 \u0441\u043c\u0435\u0448\u0438\u0432\u0430\u0435\u043c.")
         for source in unique_sources:
-            if source.DocumentCurrency_Key != contract.AccountsCurrency_Key or source.AmountVATIn:
+            if source.DocumentCurrency_Key != contract.AccountsCurrency_Key:
                 raise UserProblem("Валюта или арифметика исторической строки не поддерживается. Preview остановлен.")
             if (not source.Posted or source.DeletionMark or source.Company_Key != company.Ref_Key
                     or source.Contract_Key != contract.Ref_Key
@@ -748,7 +750,8 @@ class FirstBit:
                 raise UserProblem("Исторический источник изменился. Подготовьте preview заново.")
         vats, uoms, lines = {}, {}, []
         for selection, item, source, row in ordered:
-            line = await self._line(row, item, quantity=selection.quantity, vats=vats, uoms=uoms)
+            line = await self._line(row, item, quantity=selection.quantity,
+                                    price_includes_tax=source.AmountVATIn, vats=vats, uoms=uoms)
             lines.append(InvoiceLine(**{**line.model_dump(), "source_id": str(source.Ref_Key)}))
         edits = {edit.line_number: edit for edit in command.preview_overrides}
         if len(edits) != len(command.preview_overrides):

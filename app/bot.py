@@ -134,7 +134,9 @@ def failure_text(exc: WorkflowFailure) -> str:
         return f"Документ {exc.document_id} создан; проведение не завершено. Отправьте /retry для восстановления."
     if exc.state == "not_started":
         return "1С подтвердила, что операция не началась. /retry сначала проверит её состояние заново."
-    return "Результат операции неизвестен: документ мог быть создан. Новую запись не выполняем. /retry проверит фактическое состояние прежней операции."
+    return ("\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u0435\u043d: \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u043c\u043e\u0433 \u0431\u044b\u0442\u044c \u0441\u043e\u0437\u0434\u0430\u043d. "
+            "\u041d\u043e\u0432\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u044b \u0434\u043e \u0441\u0432\u0435\u0440\u043a\u0438; \u043d\u043e\u0432\u044b\u0439 preview \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0438\u043b\u0438 \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c. "
+            "/retry \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442 \u0444\u0430\u043a\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 \u043f\u0440\u0435\u0436\u043d\u0435\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438.")
 
 
 class Bot:
@@ -233,18 +235,23 @@ class Bot:
                 if readonly else "\nTEST / MOCK: реальные счета в 1С не создаются." if self.service.onec.is_fake is True else "")
         if not readonly and getattr(self.service.onec, 'requires_tax_invoice', False) is True:
             mode += '\nПодтверждение: Invoice → связанный Tax Invoice → штатный Tax Invoice (EN, landscape) PDF.'
-        return ConfirmationPrompt(text=notice + preview_text(prepared.preview) + mode,
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineButton(text="Проверить preview" if readonly else "Создать черновик в 1С"
-                    if getattr(self.service.onec, "posting_enabled", True) is False else "Подтвердить", callback_data=f"invoice:confirm:{pending.token}"),
-                InlineButton(text="Изменить", callback_data=f"invoice:edit:{pending.token}"),
-                InlineButton(text="Отмена", callback_data=f"invoice:cancel:{pending.token}"),
-            ]]))
+        recovery_notice = ("\n\u041f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0430\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u0430\u044f \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f \u0435\u0449\u0451 \u043d\u0435 \u0441\u0432\u0435\u0440\u0435\u043d\u0430 \u0441 1\u0421. \u041d\u043e\u0432\u044b\u0439 preview \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0438 \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c, "
+                           "\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u0435\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e\u0441\u043b\u0435 /retry." if uid in self.recoveries else "")
+        buttons = []
+        if uid not in self.recoveries:
+            buttons.append(InlineButton(
+                text="\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c preview" if readonly else "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a \u0432 1\u0421"
+                    if getattr(self.service.onec, "posting_enabled", True) is False else "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c",
+                callback_data=f"invoice:confirm:{pending.token}"))
+        buttons.extend([
+            InlineButton(text="\u0418\u0437\u043c\u0435\u043d\u0438\u0442\u044c", callback_data=f"invoice:edit:{pending.token}"),
+            InlineButton(text="\u041e\u0442\u043c\u0435\u043d\u0430", callback_data=f"invoice:cancel:{pending.token}"),
+        ])
+        return ConfirmationPrompt(text=notice + preview_text(prepared.preview) + mode + recovery_notice,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[buttons]))
 
     async def review_supplier(self, callback: CallbackQuery, request_id: str):
         uid = callback.sender.id
-        if uid in self.recoveries:
-            raise UserProblem("Сначала восстановите операцию командой /retry.")
         match = re.fullmatch(r"supplier:([a-f0-9]{32}):(accept|cancel)", callback.data)
         pending = self.supplier_reviews.get(uid)
         if (not match or pending is None or time.monotonic() > pending.expires_at
@@ -283,8 +290,6 @@ class Bot:
 
     async def choose_client(self, callback: CallbackQuery, request_id: str):
         uid = callback.sender.id
-        if uid in self.recoveries:
-            raise UserProblem("Сначала восстановите операцию командой /retry.")
         match = re.fullmatch(r"client:([a-f0-9]{32}):([1-9]|1[0-9]|cancel)", callback.data)
         pending = self.client_choices.get(uid)
         if (not match or pending is None or time.monotonic() > pending.expires_at
@@ -299,7 +304,7 @@ class Bot:
 
     async def select_client(self, uid: int, pending: PendingClientChoice, index: int, request_id: str):
         if (self.client_choices.get(uid) != pending or time.monotonic() > pending.expires_at
-                or uid in self.recoveries):
+               ):
             raise UserProblem("Выбор компании устарел. Повторите поиск.")
         if index < 0:
             raise UserProblem("Кнопка выбора компании недействительна.")
@@ -358,7 +363,7 @@ class Bot:
         uid = callback.sender.id
         match = re.fullmatch(r"service:([a-f0-9]{32}):([1-5]|cancel)", callback.data)
         pending = self.service_choices.get(uid)
-        if (match is None or pending is None or uid in self.recoveries
+        if (match is None or pending is None
                 or time.monotonic() > pending.expires_at or not hmac.compare_digest(match[1], pending.token)):
             raise UserProblem("Выбор услуги устарел или недействителен. Повторите запрос.")
         if match[2] == "cancel":
@@ -369,7 +374,7 @@ class Bot:
         return await self.select_service(uid, pending, index, request_id)
 
     async def select_service(self, uid: int, pending: PendingServiceChoice, index: int, request_id: str):
-        if (self.service_choices.get(uid) != pending or uid in self.recoveries
+        if (self.service_choices.get(uid) != pending
                 or time.monotonic() > pending.expires_at):
             raise UserProblem("Выбор услуги устарел. Повторите запрос.")
         if index < 0 or index >= len(pending.choices.candidates):
@@ -432,7 +437,7 @@ class Bot:
             uid = callback.sender.id
             match = re.fullmatch(r"initialqty:([a-f0-9]{32}):(one|edit|cancel)", callback.data)
             pending = self.initial_quantities.get(uid)
-            if (not match or pending is None or uid in self.recoveries or time.monotonic() > pending.expires_at
+            if (not match or pending is None or time.monotonic() > pending.expires_at
                     or not hmac.compare_digest(match[1], pending.token)):
                 raise UserProblem("Выбор количества устарел. Повторите запрос.")
             self.initial_quantities.pop(uid)
@@ -491,8 +496,6 @@ class Bot:
         is_voice = message.voice is not None
         uncertain_voice = None
         if is_voice:
-            if uid in self.recoveries:
-                raise UserProblem("Сначала восстановите предыдущую операцию командой /retry. Новый счёт пока не создаём.")
             if self.speech is None:
                 raise UserProblem("Сейчас доступен только текст. Пришлите компанию и дату счёта.")
             if message.text is not None:
@@ -547,7 +550,9 @@ class Bot:
         if not is_voice and text == "/cancel":
             self.pending.pop(uid, None)
             self.contexts.pop(uid, None)
-            return "Ожидающая подтверждения команда отменена."
+            if uid in self.recoveries:
+                return "\u041d\u043e\u0432\u044b\u0439 preview \u043e\u0442\u043c\u0435\u043d\u0451\u043d. \u041f\u0440\u0435\u0436\u043d\u044f\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u0430\u044f \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u043d\u0430 \u0441\u0432\u0435\u0440\u043a\u0435; \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 /retry \u0434\u043b\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438."
+            return "\u041e\u0436\u0438\u0434\u0430\u044e\u0449\u0430\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f \u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u0430; \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u0432\u0430\u043b\u0441\u044f."
         if not is_voice and text == "/retry":
             if uid not in self.recoveries:
                 context = self.contexts.get(uid)
@@ -559,8 +564,6 @@ class Bot:
                     return await self.prepare_command(uid, context.draft.command(), request_id, context)
                 return "Нет незавершённой операции для восстановления."
             return self.recoveries[uid]
-        if uid in self.recoveries:
-            raise UserProblem("Сначала восстановите предыдущую операцию командой /retry. Новый счёт пока не создаём.")
         if not is_voice and text.startswith("/confirm"):
             match = re.fullmatch(r"/confirm ([a-f0-9]{32})", text)
             pending = self.pending.get(uid)
@@ -828,12 +831,17 @@ class Bot:
                         )
                     else:
                         stage = "invoice"
+                        was_recovery = uid in self.recoveries
+                        had_new_preview = uid in self.pending
                         result = await self.service.execute(receipt.prepared, request_id, uid)
                         if result.pdf is None:
                             if result.invoice.posted:
                                 if journal is not None:
                                     journal.finalized_without_pdf(delivery.operation_id, uid)
                                 self.recoveries.pop(uid, None)
+                                if was_recovery:
+                                    self.pending.pop(uid, None)
+                                    self.contexts.pop(uid, None)
                                 receipt.response_text = (f"Счёт №{result.invoice.number or result.invoice.document_id} проведён в 1С и проверен чтением. "
                                     f"ID: {result.invoice.document_id}. Штатный PDF пока недоступен.")
                             else:
@@ -856,6 +864,9 @@ class Bot:
                             journal.delivered(delivery.operation_id, uid)
                         self.delivered[delivery] = receipt.prepared
                         self.recoveries.pop(uid, None)
+                        if was_recovery:
+                            self.pending.pop(uid, None)
+                            self.contexts.pop(uid, None)
                         context = self.contexts.pop(uid, None)
                         if context is not None:
                             self.last_contexts[uid] = context
@@ -899,5 +910,6 @@ class Bot:
         if receipt.response_text is not None:
             chunks = message_chunks(receipt.response_text)
             for index in range(receipt.response_sent, len(chunks)):
-                await self.telegram.send_text(uid, chunks[index], receipt.response_markup if index == len(chunks) - 1 else None)
                 receipt.response_sent = index + 1
+                await self.telegram.send_text(uid, chunks[index],
+                    receipt.response_markup if index == len(chunks) - 1 else None)

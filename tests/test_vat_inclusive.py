@@ -125,6 +125,38 @@ def test_inclusive_real_adapter_payload_readback_repeat_and_mixed_mode_guard(tmp
     asyncio.run(scenario())
 
 
+
+def test_selected_historical_lines_preserve_vat_inclusive_arithmetic_on_reread(tmp_path):
+    fixture = inclusive_fixture(WriteFixture())
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'private/operations.sqlite')
+        try:
+            source = fixture.records['Document_InventoryExpense'][0]
+            selections = tuple(ResolvedServiceSelection(
+                service_id=row['Item_Key'], quantity=Decimal(str(row['Quantity'])),
+                source_id=source['Ref_Key'], source_line_number=int(row['LineNumber']))
+                for row in source['Inventory'])
+            command = ResolvedInvoiceCommand(client_id=source['Company_Key'],
+                invoice_date=date(2026, 9, 1), services=selections)
+            basis = await backend.resolve_basis(command)
+            preview = basis.preview
+            assert preview.price_includes_tax is True
+            assert all(line.price_includes_tax for line in preview.lines)
+            assert len(preview.lines) == len(source['Inventory'])
+            assert preview.total == Decimal(str(source['DocumentAmount']))
+            for line, row in zip(preview.lines, source['Inventory']):
+                assert line.source_id == source['Ref_Key']
+                assert line.source_line_number == int(row['LineNumber'])
+                assert line.price == Decimal(str(row['Price']))
+                assert line.subtotal + line.tax_amount == line.total == Decimal(str(row['AmountTotal']))
+            assert all(request.method == 'GET' for request in fixture.calls)
+            assert fixture.posts == 0
+        finally:
+            await backend.aclose()
+
+    asyncio.run(scenario())
+
 def test_quantity_change_recalculates_inclusive_amounts_without_net_unit_conversion(tmp_path):
     fixture = inclusive_fixture(WriteFixture())
     src = fixture.records['Document_InventoryExpense'][0]
