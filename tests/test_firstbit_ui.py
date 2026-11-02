@@ -26,6 +26,22 @@ def test_browser_state_cannot_escape_project_private_storage(tmp_path):
         FirstBitUI(None,private_root=tmp_path/'outside-project')
     assert not (tmp_path/'outside-project').exists()
 
+
+def test_browser_state_accepts_project_private_storage_symlink(tmp_path, monkeypatch):
+    import app.firstbit_ui as ui_module
+    workspace=tmp_path/'workspace'
+    private=workspace/'.local/firstbit/native-ui'
+    private.mkdir(parents=True)
+    release=tmp_path/'release'
+    (release/'app').mkdir(parents=True)
+    try:
+        (release/'.local').symlink_to(workspace/'.local',target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f'directory symlinks are unavailable: {exc}')
+    monkeypatch.setattr(ui_module,'__file__',str(release/'app/firstbit_ui.py'))
+    ui=FirstBitUI(None,private_root=release/'.local/firstbit/native-ui')
+    assert ui.root==private.resolve()
+
 @pytest.mark.parametrize('action',['post_document','generate_tax_invoice'])
 def test_wrong_live_document_blocks_financial_action_before_provider_claim(action):
     import asyncio

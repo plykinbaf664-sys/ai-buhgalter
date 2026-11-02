@@ -64,7 +64,8 @@ class FirstBitUI:
         if not candidate.is_absolute() or candidate.is_symlink():raise ValueError('Absolute private root required')
         self.root=candidate.resolve()
         project=Path(__file__).resolve().parents[1]
-        if not self.root.is_relative_to(project/'.local/firstbit'):raise ValueError('Browser state must stay in project private storage')
+        private_base=(project/'.local/firstbit').resolve()
+        if not self.root.is_relative_to(private_base):raise ValueError('Browser state must stay in project private storage')
         self.root.mkdir(parents=True,mode=0o700,exist_ok=True)
         self._lock=asyncio.Lock()
         self._pw=self._context=self._page=None
