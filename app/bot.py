@@ -910,6 +910,6 @@ class Bot:
         if receipt.response_text is not None:
             chunks = message_chunks(receipt.response_text)
             for index in range(receipt.response_sent, len(chunks)):
-                receipt.response_sent = index + 1
                 await self.telegram.send_text(uid, chunks[index],
                     receipt.response_markup if index == len(chunks) - 1 else None)
+                receipt.response_sent = index + 1
