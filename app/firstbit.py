@@ -599,6 +599,8 @@ class FirstBit:
                     ResolvedServiceSelection(service_id=str(row.Item_Key), quantity=row.Quantity)
                     for row in sorted(template.Inventory, key=lambda row: row.LineNumber))})
                 return await self._resolve_many_basis(inferred, company, contract, history=default_history)
+        if any(selection.source_id is not None for selection in command.services):
+            return await self._resolve_selected_lines_basis(command, company, contract)
         if command.services and any(s.service_id != str(self.settings.bookkeeping_item_id) for s in command.services):
             return await self._resolve_many_basis(command, company, contract)
         item = await self._item()
@@ -623,8 +625,12 @@ class FirstBit:
             raise UserProblem("Нельзя объединять или удалять исторические строки автоматически. Укажите изменения по строкам.")
         vats: dict[UUID, VAT] = {}
         uoms: dict[tuple[str, UUID], NamedRecord] = {}
-        lines = tuple([await self._line(row, item, quantity=(selections[i].quantity
-            if selections and not expand else None), price_includes_tax=source.AmountVATIn, vats=vats, uoms=uoms) for i, row in enumerate(rows)])
+        resolved_lines = []
+        for i, row in enumerate(rows):
+            line = await self._line(row, item, quantity=(selections[i].quantity
+                if selections and not expand else None), price_includes_tax=source.AmountVATIn, vats=vats, uoms=uoms)
+            resolved_lines.append(InvoiceLine(**{**line.model_dump(), "source_id": str(source.Ref_Key)}))
+        lines = tuple(resolved_lines)
         if len({e.line_number for e in command.preview_overrides}) != len(command.preview_overrides):
             raise UserProblem("Для строки заданы противоречивые ручные правки.")
         edited_lines = list(lines)
@@ -642,6 +648,125 @@ class FirstBit:
             command.tax.mode == "without_tax" and line.tax.rate != 0 for line in lines):
             raise UserProblem("Запрошенный налоговый режим отличается от исторического. Нужна отдельная проверка 1С.")
         return await self._compose_basis(command, company, contract, source, lines)
+
+    async def _resolve_selected_lines_basis(self, command, company, contract):
+        """Re-read retained historical rows by immutable source/line identity."""
+        history = await self._history_rows(company, contract, command)
+        history_by_id = {str(source.Ref_Key): source for source in history}
+        items, sources, rows_by_source = {}, {}, {}
+        exact_entities = set()
+        for selection in command.services:
+            item = items.get(selection.service_id)
+            if item is None:
+                item = await self._record("Catalog_Items", selection.service_id)
+                if item.IsFolder or item.Inactive:
+                    raise UserProblem("Услуга в выбранном preview больше недоступна.")
+                items[selection.service_id] = item
+            if selection.source_id is not None:
+                source_key = str(UUID(selection.source_id))
+                source = history_by_id.get(source_key)
+                if source is None:
+                    raise UserProblem("Исторический источник строки изменился или больше не входит в доступную историю. Подготовьте preview заново.")
+                exact_entities.add(str(source.Entity_Key))
+                if source_key not in rows_by_source:
+                    rows_by_source[source_key] = source
+                    sources[source_key] = source
+                matches = [row for row in source.Inventory
+                           if row.LineNumber == selection.source_line_number and row.Item_Key == item.Ref_Key]
+                if len(matches) != 1:
+                    raise UserProblem("Историческая строка изменилась. Подготовьте preview заново.")
+        if len(exact_entities) > 1:
+            raise UserProblem("Сохранённые строки относятся к разным поставщикам. Preview не изменён.")
+        allowed_entity = next(iter(exact_entities), None)
+        new_selections = [selection for selection in command.services if selection.source_id is None]
+        new_items = {}
+        for selection in new_selections:
+            item = items.get(selection.service_id)
+            if item is None:
+                item = await self._record("Catalog_Items", selection.service_id)
+                if item.IsFolder or item.Inactive:
+                    raise UserProblem("Выбранная услуга недоступна.")
+                items[selection.service_id] = item
+            new_items[selection.service_id] = item
+        latest = {}
+        for service_id, item in new_items.items():
+            candidates = history if allowed_entity is None else [source for source in history
+                if str(source.Entity_Key) == allowed_entity]
+            source = self._source_for(candidates, item)
+            latest[service_id] = source
+            sources[str(source.Ref_Key)] = source
+        new_rows_by_service = {}
+        for service_id, item in new_items.items():
+            source = latest[service_id]
+            new_rows_by_service[service_id] = sorted((row for row in source.Inventory if row.Item_Key == item.Ref_Key),
+                                                      key=lambda row: row.LineNumber)
+        counts = {service_id: sum(selection.service_id == service_id for selection in new_selections)
+                  for service_id in new_items}
+        occurrences = {}
+        expanded_by_selection = {}
+        for selection in new_selections:
+            item = new_items[selection.service_id]
+            rows = new_rows_by_service[selection.service_id]
+            count = counts[selection.service_id]
+            occurrence = occurrences.get(selection.service_id, 0)
+            occurrences[selection.service_id] = occurrence + 1
+            if count == 1 and selection.quantity is None:
+                chosen_rows = rows
+            elif len(rows) == 1:
+                chosen_rows = rows
+            elif count == len(rows):
+                chosen_rows = [rows[occurrence]]
+            else:
+                raise UserProblem("Для добавленной услуги найдено несколько исторических строк. Уточните состав; строки не объединяем.")
+            expanded_by_selection[id(selection)] = [
+                (selection, item, latest[selection.service_id], row) for row in chosen_rows]
+        ordered = []
+        for selection in command.services:
+            if selection.source_id is not None:
+                source = rows_by_source[str(UUID(selection.source_id))]
+                item = items[selection.service_id]
+                row = next(r for r in source.Inventory if r.LineNumber == selection.source_line_number)
+                ordered.append((selection, item, source, row))
+            else:
+                ordered.extend(expanded_by_selection[id(selection)])
+        if not ordered or len(ordered) > 20:
+            raise UserProblem("В итоговом preview должна быть от одной до 20 строк.")
+        unique_sources = []
+        for _, _, source, _ in ordered:
+            if all(existing.Ref_Key != source.Ref_Key for existing in unique_sources):
+                unique_sources.append(source)
+        entities = {str(source.Entity_Key) for source in unique_sources}
+        if len(entities) != 1:
+            raise UserProblem("Источники добавленных услуг относятся к разным поставщикам. Выберите другой исторический образец.")
+        for source in unique_sources:
+            if source.DocumentCurrency_Key != contract.AccountsCurrency_Key or source.AmountVATIn:
+                raise UserProblem("Валюта или арифметика исторической строки не поддерживается. Preview остановлен.")
+            if (not source.Posted or source.DeletionMark or source.Company_Key != company.Ref_Key
+                    or source.Contract_Key != contract.Ref_Key
+                    or sum((row.AmountTotal for row in source.Inventory), Decimal(0)) != source.DocumentAmount
+                    or len({row.LineNumber for row in source.Inventory}) != len(source.Inventory)):
+                raise UserProblem("Исторический источник изменился. Подготовьте preview заново.")
+        vats, uoms, lines = {}, {}, []
+        for selection, item, source, row in ordered:
+            line = await self._line(row, item, quantity=selection.quantity, vats=vats, uoms=uoms)
+            lines.append(InvoiceLine(**{**line.model_dump(), "source_id": str(source.Ref_Key)}))
+        edits = {edit.line_number: edit for edit in command.preview_overrides}
+        if len(edits) != len(command.preview_overrides):
+            raise UserProblem("Для строки заданы противоречивые правки.")
+        for index, edit in edits.items():
+            if index > len(lines):
+                raise UserProblem("В preview нет такой строки.")
+            line = lines[index - 1]
+            if (line.source_id != edit.source_id or line.source_line_number != edit.source_line_number):
+                raise UserProblem("Источник или номер исторической строки изменился. Значения не перенесены.")
+            tax = await self._preview_tax(edit.tax, line.tax) if edit.tax else None
+            lines[index - 1] = line.overridden(edit.user_edit(), tax)
+        if command.tax.mode == "profile" or any(
+                command.tax.mode == "with_tax" and line.tax.rate == 0 or
+                command.tax.mode == "without_tax" and line.tax.rate != 0 for line in lines):
+            raise UserProblem("Укажите налог отдельно по строкам и проверьте профиль 1С.")
+        primary = unique_sources[0]
+        return await self._compose_basis(command, company, contract, primary, tuple(lines), sources=tuple(unique_sources))
 
     async def _resolve_many_basis(self, command, company, contract, *, history=None):
         items = {}

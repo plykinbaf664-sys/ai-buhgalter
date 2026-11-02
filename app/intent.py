@@ -2,11 +2,13 @@
 import re
 from datetime import date
 from typing import Annotated, Literal
+from uuid import uuid4
 
 from pydantic import Field, WithJsonSchema, model_validator
 
 from app.domain import (InvoiceCommand, Label, Money, PreviewLineOverride, PreviewTaxRequest,
-                        Quantity, ServicePeriod, ServiceSelection, StrictModel, TaxRequest, UserProblem)
+                        PreviewLineOrigin, PreparedInvoice, Quantity, ServicePeriod, ServiceSelection,
+                        StrictModel, TaxRequest, UserProblem)
 from app.numbers import explicit_decimal
 
 # Expose JSON numbers instead of Pydantic's Decimal string alternatives.
@@ -82,6 +84,35 @@ class IntentPreviewChange(StrictModel):
         return self
 
 
+class IntentDraftMutation(StrictModel):
+    kind: Literal["update", "delete", "add", "replace"]
+    target: Label | None = None
+    service: Label | None = None
+    quantity: IntentQuantity | None = None
+    price: Money | None = None
+    currency: Literal["AED", "USD", "EUR", "GBP", "RUB"] | None = None
+    tax: PreviewTaxRequest | None = None
+    description: Label | None = None
+
+    @model_validator(mode="after")
+    def valid_operation(self):
+        if self.kind == "delete":
+            valid = self.target is not None and self.service is None and all(
+                value is None for value in (self.quantity, self.price, self.currency, self.tax, self.description))
+        elif self.kind == "add":
+            valid = self.target is None and self.service is not None
+        elif self.kind == "replace":
+            valid = self.target is not None and self.service is not None
+        else:
+            valid = self.target is not None and self.service is None and any(
+                value is not None for value in (self.quantity, self.price, self.tax, self.description))
+        if not valid:
+            raise ValueError("Invalid draft line mutation")
+        if self.currency is not None and self.price is None:
+            raise ValueError("Currency requires a unit price")
+        return self
+
+
 class InvoiceIntent(StrictModel):
     # Required nullable fields deliberately match the Structured Outputs contract.
     action: Literal["create", "edit", "cancel", "clarify", "reject"]
@@ -99,6 +130,7 @@ class InvoiceIntent(StrictModel):
     quantity: IntentQuantity | None = None
     quantity_evidence: str | None = Field(default=None, min_length=1, max_length=1000)
     preview_changes: tuple[IntentPreviewChange, ...] = Field(default=(), max_length=20)
+    draft_mutations: tuple[IntentDraftMutation, ...] = Field(default=(), max_length=20)
 
     @model_validator(mode="after")
     def consistent(self):
@@ -109,7 +141,8 @@ class InvoiceIntent(StrictModel):
         if self.services and self.line_number is not None and self.lines_mode == "add":
             raise ValueError("Adding a line cannot replace an existing line")
         if self.action in ("cancel", "reject") and any((self.client, self.invoice_date, self.service_period,
-                                                       self.services, self.tax, self.previous, self.quantity, self.line_number, self.preview_changes, self.initial_overrides)):
+                                                       self.services, self.tax, self.previous, self.quantity, self.line_number,
+                                                       self.preview_changes, self.draft_mutations, self.initial_overrides)):
             raise ValueError("Non-action must not carry changes")
         return self
 
@@ -318,3 +351,171 @@ def merge_intent(draft: InvoiceDraft, intent: InvoiceIntent, *, today: date | No
         raise UserProblem("В одном счёте поддерживается до 20 строк. Сократите список услуг; текущие данные сохранены.")
     # model_dump is a serialization boundary; immediately revalidate the edited draft.
     return InvoiceDraft.model_validate(values)
+
+
+_ORDINAL_STEMS = (
+    (1, r"перв"), (2, r"втор"), (3, r"трет"), (4, r"четв[её]рт"), (5, r"пят"),
+    (6, r"шест"), (7, r"седьм"), (8, r"восьм"), (9, r"девят"), (10, r"десят"),
+    (11, r"одиннадцат"), (12, r"двенадцат"), (13, r"тринадцат"), (14, r"четырнадцат"),
+    (15, r"пятнадцат"), (16, r"шестнадцат"), (17, r"семнадцат"), (18, r"восемнадцат"),
+    (19, r"девятнадцат"), (20, r"двадцат"),
+)
+
+
+def _target_parts(target: str) -> tuple[int | None, str]:
+    text = target.casefold().replace("ё", "е")
+    number_match = re.search(r"(?:строк\w*|пункт\w*|позици\w*|элемент\w*|номер|№)\s*[:#№-]?\s*(\d+)|(\d+)\s*(?:строк\w*|пункт\w*|позици\w*)", text)
+    number = int(next(value for value in number_match.groups() if value)) if number_match else None
+    if number is None:
+        for value, stem in _ORDINAL_STEMS:
+            if re.search(r"\b" + stem + r"[а-яе]*\b", text):
+                number = value
+                break
+    name = text
+    name = re.sub(r"(?:строк\w*|пункт\w*|позици\w*|элемент\w*)\s*(?:номер\s*)?(?:№\s*)?\d+", " ", name)
+    name = re.sub(r"\d+\s*(?:строк\w*|пункт\w*|позици\w*)", " ", name)
+    name = re.sub(r"\b(?:строк\w*|пункт\w*|позици\w*|элемент\w*|номер|№)\b", " ", name)
+    for _, stem in _ORDINAL_STEMS:
+        name = re.sub(r"\b" + stem + r"[а-яе]*\b", " ", name)
+    name = re.sub(r"\b(?:и|или|в|во|на|пожалуйста|удали|удалить|изменить|измени|поменяй|исправь|строку|пункт)\b", " ", name)
+    name = re.sub(r"[^\w]+", " ", name, flags=re.UNICODE)
+    return number, " ".join(name.split())
+
+
+def _resolve_draft_target(target: str, prepared: PreparedInvoice, line_ids: tuple[str, ...], command: InvoiceCommand) -> str:
+    number, name = _target_parts(target)
+    number_id = line_ids[number - 1] if number is not None and 1 <= number <= len(line_ids) else None
+    if number is not None and number_id is None:
+        raise UserProblem(f"В текущем preview нет строки {number}.")
+    if not name:
+        if number_id is None:
+            raise UserProblem("Укажите номер или название строки, которую нужно изменить.")
+        return number_id
+    candidates = set()
+    for index, line in enumerate(prepared.preview.lines):
+        labels = [line.description]
+        if index < len(command.services):
+            labels.append(command.services[index].query)
+        normalized = {re.sub(r"[^\w]+", " ", label.casefold().replace("ё", "е")).strip() for label in labels}
+        if name in normalized or any(len(name) >= 4 and (name in label or label in name) for label in normalized):
+            candidates.add(line_ids[index])
+    if number_id is not None:
+        if candidates and number_id not in candidates:
+            raise UserProblem("Номер строки и название указывают на разные позиции. Уточните цель правки.")
+        if not candidates:
+            raise UserProblem("Название в ссылке не совпало с указанной строкой preview.")
+        return number_id
+    if len(candidates) == 1:
+        return next(iter(candidates))
+    if not candidates:
+        raise UserProblem(f"В preview не нашёл услугу «{target.strip()}».")
+    numbers = [str(index + 1) for index, line_id in enumerate(line_ids) if line_id in candidates]
+    raise UserProblem(f"Название совпадает с несколькими строками ({', '.join(numbers)}). Укажите номер.")
+
+
+def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
+                          line_ids: tuple[str, ...], origins: dict[str, PreviewLineOrigin],
+                          mutations: tuple[IntentDraftMutation, ...]):
+    """Resolve a batch against one displayed preview, then build a new typed command."""
+    if len(line_ids) != len(prepared.preview.lines) or len(command.services) != len(line_ids):
+        raise UserProblem("Текущий preview изменился. Откройте последнее сообщение и повторите правку.")
+    if len(set(line_ids)) != len(line_ids):
+        raise UserProblem("Не удалось сохранить идентичность строк preview. Подготовьте его заново.")
+    states = {line_id: {"query": command.services[index].query,
+                        "quantity": command.services[index].quantity or prepared.preview.lines[index].quantity,
+                        "origin": origins.get(line_id), "new": False, "override": {}}
+              for index, line_id in enumerate(line_ids)}
+    order = list(line_ids)
+    deletes: set[str] = set()
+    issues = []
+    changed_fields: dict[tuple[str, str], object] = {}
+
+    for mutation in mutations:
+        if mutation.kind == "add":
+            if any((mutation.price, mutation.tax, mutation.description, mutation.currency)):
+                raise UserProblem("Сначала добавьте услугу и проверьте новый preview; затем можно изменить её цену или НДС.")
+            line_id = "draft:" + uuid4().hex
+            states[line_id] = {"query": mutation.service, "quantity": mutation.quantity,
+                               "origin": None, "new": True, "override": {}}
+            order.append(line_id)
+            continue
+        try:
+            line_id = _resolve_draft_target(mutation.target, prepared, line_ids, command)
+        except UserProblem as exc:
+            issues.append(str(exc))
+            continue
+        state = states[line_id]
+        if mutation.kind == "delete":
+            deletes.add(line_id)
+            continue
+        if mutation.kind == "replace":
+            if any((mutation.price, mutation.tax, mutation.description, mutation.currency)):
+                raise UserProblem("Сначала замените услугу и проверьте новый preview; затем можно изменить её цену или НДС.")
+            old_index = order.index(line_id)
+            replacement_id = "draft:" + uuid4().hex
+            states[replacement_id] = {"query": mutation.service,
+                "quantity": mutation.quantity or state["quantity"], "origin": None, "new": True, "override": {}}
+            order[old_index] = replacement_id
+            deletes.add(line_id)
+            continue
+        if line_id in deletes:
+            raise UserProblem("Одну строку одновременно удаляют и редактируют. Уточните список правок.")
+        updates = {"quantity": mutation.quantity}
+        for key in ("price", "currency", "tax", "description"):
+            value = getattr(mutation, key)
+            if value is not None:
+                updates[key] = value
+        for key, value in updates.items():
+            if value is None:
+                continue
+            identity = (line_id, key)
+            if identity in changed_fields and changed_fields[identity] != value:
+                raise UserProblem("Для одной строки указаны разные значения одного поля. Уточните правку.")
+            changed_fields[identity] = value
+            if key == "quantity":
+                state["quantity"] = value
+            else:
+                state["override"][key] = value
+
+    order = [line_id for line_id in order if line_id not in deletes]
+    if deletes.intersection(line_id for line_id, _ in changed_fields):
+        raise UserProblem("Одну строку одновременно удаляют и редактируют. Уточните список правок.")
+    if not order:
+        raise UserProblem("В счёте должна остаться хотя бы одна строка.")
+    if len(order) > 20:
+        raise UserProblem("В одном счёте поддерживается до 20 строк.")
+
+    old_override = {edit.line_number: edit for edit in prepared.preview.user_overrides}
+    next_ids, next_origins, next_services, next_selected, merged = [], {}, [], {}, {}
+    for new_number, line_id in enumerate(order, 1):
+        state = states[line_id]
+        next_ids.append(line_id)
+        if state["origin"] is not None:
+            next_origins[line_id] = state["origin"]
+            next_selected[new_number] = state["origin"].service_id
+        elif not state["new"]:
+            original_index = line_ids.index(line_id)
+            line = prepared.preview.lines[original_index]
+            next_selected[new_number] = line.service_id
+            if line.source_id is not None and line.source_line_number is not None:
+                next_origins[line_id] = PreviewLineOrigin(service_id=line.service_id, source_id=line.source_id,
+                    source_line_number=line.source_line_number)
+        next_services.append(ServiceSelection(query=state["query"], quantity=state["quantity"]))
+        fields = {}
+        if line_id in line_ids:
+            old = line_ids.index(line_id)
+            prior = old_override.get(old + 1)
+            if prior is not None:
+                fields = {key: getattr(prior, key) for key in ("price", "amount", "currency", "description", "tax")
+                          if getattr(prior, key) is not None}
+        fields.update(state["override"])
+        if fields:
+            # Amount and unit price are mutually exclusive; the latest explicit one wins.
+            if "price" in state["override"]:
+                fields.pop("amount", None)
+            if "amount" in state["override"]:
+                fields.pop("price", None)
+            merged[new_number] = PreviewLineOverride(line_number=new_number, **fields)
+    next_command = InvoiceCommand(**{**command.model_dump(), "services": tuple(next_services),
+        "preview_overrides": tuple(merged[number] for number in sorted(merged)), "initial_overrides": ()})
+    return next_command, tuple(next_ids), next_origins, next_selected, tuple(issues)

@@ -105,7 +105,7 @@ def offline_smoke():
         assert token() != old
         assert app.state.bot.pending[123].prepared.preview.total == 4200
         press(3, "invoice:confirm:" + old)
-        assert "устарело" in replies[-1]["text"]
+        assert "последнем сообщении" in replies[-1]["text"]
         valid = token()
         source = fixture.records["Document_InventoryExpense"][0]
         source["Inventory"][1] = fixture.line(2, "2", "1200")

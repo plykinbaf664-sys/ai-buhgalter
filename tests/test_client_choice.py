@@ -363,6 +363,7 @@ def test_uncertain_readonly_edit_cannot_change_existing_preview(flow, monkeypatc
     assert send(flow).status_code == 200
     bot = client.app.state.bot
     before = bot.pending[123].prepared
+    confirm_token = bot.pending[123].token
     transcript = Transcript.model_validate({'text': 'Цена 9999', 'logprobs': [{'token': 'x', 'logprob': -4.0}]})
     async def transcribe(audio):
         raise UncertainTranscript(transcript, 'Уточните цену текстом')
@@ -378,7 +379,7 @@ def test_uncertain_readonly_edit_cannot_change_existing_preview(flow, monkeypatc
     update = {'update_id': 2, 'message': {'message_id': 2, 'from': {'id': 123, 'is_bot': False},
         'chat': {'id': 123, 'type': 'private'}, 'voice': {'file_id': 'v', 'file_unique_id': 'u', 'duration': 5}}}
     assert client.post('/telegram/webhook', json=update).status_code == 200
-    assert 123 not in bot.pending and 123 not in bot.client_choices
+    assert bot.pending[123].token == confirm_token and 123 not in bot.client_choices
     assert bot.contexts[123].prepared == before
     assert len(fixture.calls) == gets
     assert 'reply_markup' not in sent[-1]

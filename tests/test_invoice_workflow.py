@@ -182,9 +182,13 @@ def test_sequential_short_edits_keep_context_and_rotate_confirmation(workflow):
 def test_ambiguous_added_service_preserves_other_lines_on_clarification(workflow):
     send(workflow, TEXT, initial())
     old = token(workflow)
+    original = preview(workflow)
     send(workflow, "Добавь ещё консультацию", intent(lines_mode="add", services=(ServiceSelection(query="консультацию"),)), 2)
     assert "Уточните услугу" in prompt(workflow)["text"]
-    assert press(workflow, old).status_code == 200 and not workflow[1].documents
+    assert workflow[0].app.state.bot.pending[123].token == old.rsplit(":", 1)[-1]
+    assert preview(workflow) == original and not workflow[1].documents
+    assert workflow[0].app.state.bot.contexts[123].draft.unresolved_line == 2
+    assert len(workflow[0].app.state.bot.contexts[123].draft.services) == 2
     send(workflow, "Юридическую консультацию", intent(lines_mode="replace", services=(ServiceSelection(query="Юридическую консультацию"),)), 3)
     assert [line.service_id for line in preview(workflow).lines] == ["service-accounting", "service-legal"]
     assert preview(workflow).total == Decimal("1575.00")
@@ -327,7 +331,7 @@ def test_preview_delivery_retry_never_reinterprets_or_writes(workflow):
 
 def test_unsupported_natural_request_is_safely_rejected(workflow):
     send(workflow, "мусор", intent(action="reject"))
-    assert not workflow[1].documents and "Укажите запрос" in prompt(workflow)["text"]
+    assert not workflow[1].documents and "Укажите запрос на счёт" in prompt(workflow)["text"]
 
 
 @pytest.mark.parametrize("change", [{"amount": 100}, {"tax": {"mode": "with_tax", "query": None, "evidence": "с НДС", "rate": 5}},
@@ -427,12 +431,12 @@ def test_refresh_data_failure_preserves_pending_and_does_not_write(workflow, mon
     assert len(workflow[1].documents) == 1
 
 
-def test_invalid_calendar_edit_revokes_confirmation_and_keeps_draft(workflow):
+def test_invalid_calendar_edit_preserves_confirmation_and_keeps_draft(workflow):
     send(workflow, TEXT, initial())
     old = token(workflow)
     send(workflow, "На 31 февраля 2026", intent(invoice_date=CalendarInput(day=31, month=2, year=2026, evidence="31 февраля 2026")), 2)
     assert "нет в календаре" in prompt(workflow)["text"]
-    press(workflow, old)
+    assert workflow[0].app.state.bot.pending[123].token == old.rsplit(":", 1)[-1]
     assert not workflow[1].documents
     send(workflow, "На второе", intent(invoice_date=CalendarInput(day=2, month=None, year=None, evidence="второе")), 3)
     assert preview(workflow).invoice_date == date(2026, 10, 2)
@@ -456,12 +460,12 @@ def test_large_preview_delivers_every_line_and_buttons_only_after_all_values(wor
     assert not backend.documents
 
 
-def test_failed_voice_edit_revokes_old_confirmation_and_keeps_context(workflow):
+def test_failed_voice_edit_preserves_old_confirmation_and_keeps_context(workflow):
     send(workflow, TEXT, initial())
     old = token(workflow)
     workflow[4]["fail"] = 500
     send(workflow, "Без НДС", number=2, voice=True)
-    press(workflow, old)
+    assert workflow[0].app.state.bot.pending[123].token == old.rsplit(":", 1)[-1]
     assert not workflow[1].documents and 123 in workflow[0].app.state.bot.contexts
     workflow[4]["fail"] = None
     send(workflow, "Дату на пятое", intent(invoice_date=CalendarInput(day=5, month=None, year=None, evidence="пятое")), 3)

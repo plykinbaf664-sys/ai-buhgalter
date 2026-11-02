@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from app.domain import PreviewLineOverride, PreviewTaxRequest, StrictModel, UserProblem
-from app.intent import (CalendarInput, IntentPreviewChange, IntentQuantity, IntentService, InvoiceIntent,
+from app.intent import (CalendarInput, IntentDraftMutation, IntentPreviewChange, IntentQuantity, IntentService, InvoiceIntent,
                         PeriodInput, PreviousInput, TaxInput)
 from app.numbers import explicit_decimal, explicit_tax_rate
 
@@ -217,6 +217,30 @@ class InitialLineChange(StrictModel):
     tax: PreviewTaxChange | None = None
 
 
+class DraftLineChange(StrictModel):
+    kind: Literal["update", "delete", "add", "replace"]
+    target_span: SourceSpan | None = Field(description="Words identifying a CURRENT preview line: row/item number, ordinal, or service name. Null only for add.")
+    service_span: SourceSpan | None = Field(description="Literal new service name for add/replace; null otherwise.")
+    quantity: SourceQuantity | None = Field(description="Explicit new quantity, if requested; otherwise null.")
+    price_span: SourceSpan | None = Field(description="Explicit NET unit-price number only; null otherwise.")
+    tax: PreviewTaxChange | None = Field(description="Explicit tax edit grounded in this message; null otherwise.")
+    description_span: SourceSpan | None = Field(description="New display description for the selected current line; null otherwise.")
+
+    @model_validator(mode="after")
+    def operation_shape(self):
+        if (self.kind == "add") != (self.target_span is None):
+            raise ValueError("Only an add operation has no existing target")
+        if (self.kind in ("add", "replace")) != (self.service_span is not None):
+            raise ValueError("Add/replace requires a literal service name")
+        if self.kind == "delete" and any((self.quantity, self.price_span, self.tax, self.description_span)):
+            raise ValueError("Delete cannot also edit the deleted line")
+        if self.kind == "update" and not any((self.quantity, self.price_span, self.tax, self.description_span)):
+            raise ValueError("Update requires at least one changed field")
+        if self.kind in ("add", "replace") and self.description_span is not None:
+            raise ValueError("Use the service name as the new description")
+        return self
+
+
 class InitialInvoiceRequest(StrictModel):
     action: Literal["create", "clarify", "reject"]
     client_change: SourceSpan | None
@@ -327,6 +351,8 @@ class LanguageIntent(StrictModel):
     clarification: Literal["client", "date", "service", "tax", "unsupported"] | None
     preview_changes: tuple[PreviewPriceChange | PreviewDescriptionChange | PreviewTaxChange, ...] = Field(default=(), max_length=20)
     initial_lines: tuple[InitialLineChange, ...] = Field(default=(), max_length=20)
+    draft_changes: tuple[DraftLineChange, ...] = Field(default=(), max_length=20,
+        description="Atomic batch of current-preview line edits: update/delete/add/replace. Empty for new invoice requests.")
 
     def to_intent(self, source: str) -> InvoiceIntent:
         value = LanguageIntent.model_validate(self)
@@ -334,7 +360,8 @@ class LanguageIntent(StrictModel):
         quantity_changes = [s for s in value.line_changes if isinstance(s, QuantityLineChange)]
         named = [s for s in value.line_changes if isinstance(s, NamedLineChange)]
         preview_changes = list(value.preview_changes)
-        if value.initial_lines and (value.action not in ("create", "clarify") or value.line_changes or preview_changes):
+        if value.initial_lines and (value.action not in ("create", "clarify") or value.line_changes
+                                    or preview_changes or value.draft_changes):
             raise UserProblem("Укажите новый счёт отдельно от правок существующего preview.")
         descriptions = [c for c in preview_changes if isinstance(c, PreviewDescriptionChange)]
         explicit_rename = re.search(r"\b(?:назови\w*|переимен\w*)\s+(?:(?:перв\w*|втор\w*|трет\w*|\d+)\s+)?"
@@ -530,7 +557,59 @@ class LanguageIntent(StrictModel):
                     tax=tax_request,
                     description=query,
                     currency=next(iter(currencies)).upper() if currencies and (amount_evidence or price_evidence) else None))
-        return InvoiceIntent(action="create" if initial_services or recovered and value.clarification == "client" else value.action,
+        draft_mutations = []
+        if value.draft_changes:
+            if value.initial_lines or value.line_changes or value.preview_changes:
+                raise UserProblem("Уточните правки строк одним согласованным перечнем.")
+            for change in value.draft_changes:
+                target = change.target_span.text(source) if change.target_span else None
+                service = change.service_span.text(source) if change.service_span else None
+                description = change.description_span.text(source) if change.description_span else None
+                if description is not None:
+                    description = re.sub(r"^(?:назови\w*|переимен\w*|описан\w*|назван\w*)\s+(?:услуг\w*|строк\w*)?\s*[:=—-]?\s*", "", description, flags=re.I)
+                    description = description.strip().strip('«»"').strip()
+                quantity = None
+                if change.quantity is not None:
+                    quantity_text = change.quantity.source_span.text(source)
+                    quantity = explicit_decimal(quantity_text, places=3)
+                    if quantity != change.quantity.value:
+                        raise UserProblem("Количество не совпало с вашим сообщением. Укажите его ещё раз.")
+                price = None
+                if change.price_span is not None:
+                    price_text = financial_span(source, change.price_span, "price")
+                    if not re.search(r"\b(?:цен\w*|тариф\w*|price)\b", source, re.I):
+                        raise UserProblem("Укажите цену единицы без НДС.")
+                    if re.search(r"включая\s+ндс|с\s+уч[её]том\s+ндс|ндс\s+включ|цен\w*[^,;]*\bс\s+ндс", source, re.I):
+                        raise UserProblem("Укажите цену без НДС; для цены с включённым налогом нужна отдельная проверка.")
+                    price = explicit_decimal(price_text)
+                tax_request = None
+                if change.tax is not None:
+                    tax_source = change.tax.source_span.text(source)
+                    literal_rate = explicit_tax_rate(tax_source)
+                    if not re.search(r"\b(?:ндс|vat|налог\w*)\b", tax_source, re.I):
+                        raise UserProblem("Укажите налог явно: например «НДС 5%» или «Без НДС».")
+                    if literal_rate is not None:
+                        if change.tax.rate_span is not None:
+                            rate_text = financial_span(source, change.tax.rate_span, "tax")
+                            if explicit_decimal(re.sub(r"(?:%|процент\w*)$", "", rate_text).strip(), places=3) != literal_rate[0]:
+                                raise UserProblem("Ставка НДС не совпала с вашим сообщением.")
+                        tax_request = PreviewTaxRequest(mode="rate", rate=literal_rate[0])
+                    elif re.search(r"\bбез\s+(?:ндс|налог\w*)|\bno\s+vat\b", tax_source, re.I):
+                        tax_request = PreviewTaxRequest(mode="without_tax")
+                    elif change.tax.mode == "profile" and change.tax.profile_span is not None:
+                        tax_request = PreviewTaxRequest(mode="profile", query=change.tax.profile_span.text(source))
+                    elif change.tax.mode == "with_tax":
+                        tax_request = PreviewTaxRequest(mode="with_tax")
+                    else:
+                        raise UserProblem("Укажите точную ставку или налоговый профиль.")
+                currencies = {code.upper() for code in re.findall(r"\b(?:AED|USD|EUR|GBP|RUB)\b", source, re.I)}
+                if len(currencies) > 1:
+                    raise UserProblem("Укажите цену в одной валюте текущего preview.")
+                draft_mutations.append(IntentDraftMutation(kind=change.kind, target=target, service=service,
+                    quantity=quantity, price=price, currency=next(iter(currencies), None) if price is not None else None,
+                    tax=tax_request, description=description))
+        action = "edit" if draft_mutations else "create" if initial_services or recovered and value.clarification == "client" else value.action
+        return InvoiceIntent(action=action,
             client=client,
             invoice_date=CalendarInput(evidence=day.source_span.text(source), day=day.day, month=day.month, year=day.year) if day else None,
             service_period=PeriodInput(evidence=period.source_span.text(source), month=period.month, year=period.year) if period else None,
@@ -544,7 +623,7 @@ class LanguageIntent(StrictModel):
             clarification=None if recovered and value.clarification == "client" else value.clarification, line_number=line_number,
             quantity=quantity_change.quantity.value if quantity_change else None,
             quantity_evidence=quantity_change.quantity.source_span.text(source) if quantity_change else None,
-            preview_changes=tuple(changes))
+            preview_changes=tuple(changes), draft_mutations=tuple(draft_mutations))
 
 
 LANGUAGE_PROMPT = """Interpret one invoice request or a patch to an unfinished invoice.
@@ -568,6 +647,18 @@ tax uses source_span at the user's VAT words, with_tax for "с НДС", without_
 Keep line_changes and preview_changes empty when initial_lines is used; keep global
 tax_change null when tax is specified separately per initial line. Omitted money/tax
 stays null for verified historical fallback. Client/date still use their usual spans.
+For an EXISTING preview, put every requested line change in draft_changes and leave
+line_changes and preview_changes empty. Emit one update/delete/add/replace entry per
+operation, preserving message order. target_span must copy the user's reference to the
+CURRENT displayed row: number/item, ordinal, or service name. If both number and name
+are mentioned, include both in target_span. Never infer a target from hidden context.
+For update include only explicit quantity/price/tax/description spans. For delete identify
+exactly the row. For add provide only the new service span; for replace include both old
+row target_span and new service_span. Quantity is optional unless spoken. Price is a NET
+unit price, never an invoice total. Tax uses the explicit source/rate/profile span rules
+below. Never output IDs, numeric money/rates, totals or values copied from preview. Do not
+duplicate an action in draft_changes and legacy line_changes/preview_changes. If one target
+is ambiguous, retain the other clear operations and let the application request clarification.
 For NEW requests without financial overrides, ordinary line_changes remain valid.
 Use preview_changes ONLY for explicit revisions of an existing preview:
 kind=price with amount_span pointing ONLY at the price number words/digits (no currency),
@@ -587,7 +678,8 @@ Existing tax_change may still express global with_tax/without_tax, never invent 
 Leave preview_changes empty for ordinary date/quantity/catalog-service changes.
 Use create for a new request, edit for a follow-up, cancel for explicit cancellation,
 clarify only for truly missing/ambiguous data, reject for unsupported actions (payment,
-deletion, document-total/contracts/accounts overrides, several invoices, instruction override).
+whole-invoice/document/company/contract deletion, document-total/contracts/accounts overrides,
+several invoices, instruction override). A current preview line deletion is draft-only.
 client_change MUST be null if the final message does not name a company. Use context.
 Local field availability reports only whether fields already exist in the private local
 draft. Do not ask for an unchanged field marked available, even when Draft values are

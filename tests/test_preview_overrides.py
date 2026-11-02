@@ -50,8 +50,21 @@ def tax(text, fragment, row=None):
 
 
 @pytest.fixture
-def flow(monkeypatch):
+def flow(monkeypatch, request):
     fixture = FirstBitFixture()
+    from decimal import Decimal
+    source = fixture.records["Document_InventoryExpense"][0]
+    line_count = getattr(request, "param", 2)
+    source["Inventory"] = [fixture.line(index, "1" if index != 2 else "2", "1000.00")
+                            for index in range(1, line_count + 1)]
+    payroll = {**fixture.records["Catalog_Items"][0], "Ref_Key": ref(15),
+               "Description": "Payroll services", "Code": "SYN-015"}
+    fixture.records["Catalog_Items"].append(payroll)
+    payroll_line = fixture.line(99, "1", "250.00")
+    payroll_line["Item_Key"] = ref(15)
+    payroll_line["Content"] = "Payroll services"
+    source["Inventory"].append(payroll_line)
+    source["DocumentAmount"] = str(sum((Decimal(row["AmountTotal"]) for row in source["Inventory"]), Decimal(0)))
     for key, value in fixture.env().items():
         monkeypatch.setenv(key, value)
     vat = fixture.records["Catalog_VATRates"][0]
@@ -110,6 +123,29 @@ def send(flow, text, changes=None, *, voice=False, tax_change=None):
     assert flow["client"].post("/telegram/webhook", json={"update_id": n, "message": message}).status_code == 200
 
 
+def source_quantity(text, fragment, value):
+    return {"source_span": span(text, fragment), "value": value}
+
+
+def draft_change(text, kind, *, target=None, service=None, quantity=None,
+                 price_span=None, tax=None, description=None):
+    return {"kind": kind,
+            "target_span": span(text, target) if target else None,
+            "service_span": span(text, service) if service else None,
+            "quantity": source_quantity(text, quantity[0], quantity[1]) if quantity else None,
+            "price_span": span(text, price_span) if price_span else None,
+            "tax": tax,
+            "description_span": span(text, description) if description else None}
+
+
+def send_draft_changes(flow, text, changes, *, voice=False):
+    flow["outputs"].append({"action": "edit", "client_change": None, "date_change": None,
+        "period_change": None, "line_changes": [], "tax_change": None,
+        "previous_hint_request": None, "clarification": None, "preview_changes": [],
+        "initial_lines": [], "draft_changes": changes})
+    send(flow, text, voice=voice)
+
+
 def press(flow, data):
     flow["number"] += 1
     n = flow["number"]
@@ -145,24 +181,173 @@ def test_price_tax_and_description_preserve_id_other_row_and_readonly_confirmati
     assert "Изменено пользователем" in flow["sent"][-1]["text"]
     current = button(flow)
     press(flow, old_button)
-    assert "устарело" in flow["sent"][-1]["text"]
+    assert "последнем сообщении" in flow["sent"][-1]["text"]
     press(flow, current)
-    assert "документ не создавался" in flow["sent"][-1]["text"]
+    assert "READ-ONLY" in flow["sent"][-1]["text"]
     assert {r.method for r in flow["fixture"].calls} == {"GET"}
 
 
-def test_ambiguous_row_and_unknown_tax_revoke_confirmation(flow):
+@pytest.mark.parametrize("flow", [5], indirect=True)
+@pytest.mark.parametrize("voice", [False, True])
+def test_real_reported_multi_line_edit_returns_new_preview_and_invalidates_only_old_confirm(flow, voice):
+    original = prepared(flow)
+    old_button = button(flow)
+    old_context = flow["client"].app.state.bot.contexts[123]
+    text = "Строка 2 исправить на 4 штуки. Строка 3, строка 4 удалить."
+    changes = [
+        draft_change(text, "update", target="Строка 2", quantity=("4", 4)),
+        draft_change(text, "delete", target="Строка 3"),
+        draft_change(text, "delete", target="строка 4"),
+    ]
+    send_draft_changes(flow, text, changes, voice=voice)
+    assert 123 in flow["client"].app.state.bot.pending, flow["sent"][-1]["text"]
+    edited = prepared(flow)
+    context = flow["client"].app.state.bot.contexts[123]
+    assert [line.source_line_number for line in edited.preview.lines] == [1, 2, 5]
+    assert [line.quantity for line in edited.preview.lines] == [1, 4, 1]
+    assert [line.description for line in edited.preview.lines] == [
+        "Bookkeeping synthetic row 1", "Bookkeeping synthetic row 2", "Bookkeeping synthetic row 5"]
+    assert edited.preview.subtotal == 6000
+    assert edited.preview.tax_amount == 300
+    assert edited.preview.total == 6300
+    assert edited.operation_id == original.operation_id
+    assert edited.preview.digest != original.preview.digest
+    assert context.line_ids == (old_context.line_ids[0], old_context.line_ids[1], old_context.line_ids[4])
+    assert len(set(context.line_ids)) == 3
+    assert [origin.source_line_number for origin in context.line_origins.values()] == [1, 2, 5]
+    assert "Предварительный счёт" in flow["sent"][-1]["text"]
+    assert "Всего без НДС: 6 000.00 AED" in flow["sent"][-1]["text"]
+    current_button = button(flow)
+    assert old_button != current_button
+    press(flow, old_button)
+    assert "последнем сообщении" in flow["sent"][-1]["text"]
+    press(flow, current_button)
+    assert "документ не создавался" in flow["sent"][-1]["text"]
+    assert {request.method for request in flow["fixture"].calls} == {"GET"}
+
+
+def test_named_mixed_and_ordinal_targets_keep_current_line_identity(flow):
+    original = prepared(flow)
+    text = "У Bookkeeping synthetic row 1 количество 3, а у строки 2 (Bookkeeping synthetic row 2) сделай 5 штук."
+    changes = [
+        draft_change(text, "update", target="Bookkeeping synthetic row 1", quantity=("3", 3)),
+        draft_change(text, "update", target="строки 2 (Bookkeeping synthetic row 2)", quantity=("5", 5)),
+    ]
+    send_draft_changes(flow, text, changes)
+    updated = prepared(flow)
+    assert [line.quantity for line in updated.preview.lines] == [3, 5]
+    assert updated.preview.lines[0].source_line_number == 1
+    assert updated.preview.lines[1].source_line_number == 2
+    assert updated.preview.lines[0].description == "Bookkeeping synthetic row 1"
+    assert updated.preview.lines[0].quantity == 3
+    assert updated.preview.total == 8400
+    assert updated.request.client_id == original.request.client_id
+    assert updated.preview.issuer == original.preview.issuer
+
+
+def test_add_and_replace_service_use_live_historical_basis_without_merging_rows(flow):
+    before = prepared(flow)
+    text = "Добавь Payroll services 2 штуки"
+    send_draft_changes(flow, text, [draft_change(text, "add", service="Payroll services", quantity=("2", 2))])
+    added = prepared(flow)
+    assert not flow["client"].app.state.bot.contexts[123].command.initial_overrides
+    assert len(flow["client"].app.state.bot.contexts[123].line_origins) == 3
+    assert len(added.preview.lines) == 3
+    assert [line.description for line in added.preview.lines] == [
+        "Bookkeeping synthetic row 1", "Bookkeeping synthetic row 2", "Payroll services"]
+    assert added.preview.lines[2].quantity == 2
+    assert added.preview.total == before.preview.total + 525
+    assert added.preview.lines[2].service_id == ref(15)
+    assert added.operation_id == before.operation_id
+
+    text = "Замени пункт 2 на Payroll services, количество 1"
+    send_draft_changes(flow, text, [draft_change(text, "replace", target="пункт 2",
+        service="Payroll services", quantity=("1", 1))])
+    replaced = prepared(flow)
+    assert len(replaced.preview.lines) == 3
+    assert [line.description for line in replaced.preview.lines] == [
+        "Bookkeeping synthetic row 1", "Payroll services", "Payroll services"], flow["sent"][-1]["text"]
+    assert [line.quantity for line in replaced.preview.lines] == [1, 1, 2]
+    assert replaced.preview.lines[1].service_id == ref(15)
+
+
+def test_price_tax_and_rename_can_be_one_grounded_mutation(flow):
+    original = prepared(flow)
+    text = "В первой строке цена 1200, НДС 0%, название Bookkeeping Q4 service"
+    tax_change = {"kind": "tax", "line_number": None, "source_span": span(text, "НДС 0%"),
+        "mode": "rate", "rate_span": span(text, "0%"), "profile_span": None}
+    changes = [draft_change(text, "update", target="первой строке", price_span="1200",
+        tax=tax_change, description="Bookkeeping Q4 service")]
+    send_draft_changes(flow, text, changes)
+    updated = prepared(flow)
+    first, second = updated.preview.lines
+    assert first.description == "Bookkeeping Q4 service"
+    assert first.service_id == original.preview.lines[0].service_id
+    assert first.price == 1200 and first.tax.rate == 0 and first.tax.treatment == "zero_rated"
+    assert second == original.preview.lines[1]
+    assert updated.preview.subtotal == 3200
+    assert updated.preview.tax_amount == 100
+    assert updated.preview.total == 3300
+
+
+def test_repeated_edit_addresses_new_display_numbers_after_delete(flow):
+    initial = prepared(flow)
+    text = "Удали первую строку"
+    send_draft_changes(flow, text, [draft_change(text, "delete", target="первую строку")])
+    after_delete = prepared(flow)
+    assert [line.source_line_number for line in after_delete.preview.lines] == [2]
+    assert after_delete.preview.lines[0].quantity == initial.preview.lines[1].quantity
+    text = "Теперь строку 1 поставь 4 штуки"
+    send_draft_changes(flow, text, [draft_change(text, "update", target="строку 1", quantity=("4", 4))])
+    after_update = prepared(flow)
+    assert len(after_update.preview.lines) == 1
+    assert after_update.preview.lines[0].source_line_number == 2
+    assert after_update.preview.lines[0].quantity == 4
+    assert after_update.operation_id == initial.operation_id
+    assert after_update.preview.digest != after_delete.preview.digest
+
+
+def test_ambiguous_part_is_reported_but_clear_operations_apply_and_context_survives(flow):
+    old_button = button(flow)
+    old = prepared(flow)
+    text = "У второй строки количество 4, AML services удали."
+    changes = [
+        draft_change(text, "update", target="второй строки", quantity=("4", 4)),
+        draft_change(text, "delete", target="AML services"),
+    ]
+    send_draft_changes(flow, text, changes)
+    updated = prepared(flow)
+    assert updated.preview.lines[1].quantity == 4
+    assert len(updated.preview.lines) == 2
+    assert updated.request.client_id == old.request.client_id
+    assert updated.preview.historical_proposal.contract_id == old.preview.historical_proposal.contract_id
+    assert "Применил однозначные правки" in flow["sent"][-1]["text"]
+    assert "не нашёл услугу" in flow["sent"][-1]["text"]
+    assert button(flow) != old_button
+
+
+def test_ambiguous_target_only_preserves_preview_and_confirmation(flow):
+    old_button = button(flow)
+    old = prepared(flow)
+    text = "У bookkeeping поставь 4 штуки"
+    send_draft_changes(flow, text, [draft_change(text, "update", target="bookkeeping", quantity=("4", 4))])
+    assert prepared(flow) == old
+    assert flow["client"].app.state.bot.pending[123].token == old_button.split(":")[-1]
+    press(flow, old_button)
+    assert "READ-ONLY" in flow["sent"][-1]["text"]
+
+
+def test_ambiguous_row_and_unknown_tax_preserve_confirmation(flow):
     old = button(flow)
+    token = old.split(":")[-1]
     text = "Цена 1500"
     send(flow, text, [price(text, "1500")])
     assert "номер строки" in flow["sent"][-1]["text"]
-    assert not flow["client"].app.state.bot.pending
-    press(flow, old)
-    assert "устарело" in flow["sent"][-1]["text"]
+    assert flow["client"].app.state.bot.pending[123].token == token
     text = "В первой строке НДС 10%"
     send(flow, text, [tax(text, "10%", 1)])
     assert "Налоговый профиль не найден" in flow["sent"][-1]["text"]
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
 
 
 def test_exempt_is_catalog_profile_and_differs_from_zero_rate(flow):
@@ -185,6 +370,13 @@ def test_refresh_never_rebinds_or_repairs_historical_source(flow, kind):
         source["Inventory"][0]["LineNumber"] = 9
     else:
         source["Inventory"][0]["Price"] = "999"
+    if kind == "invalid_source_money":
+        from decimal import Decimal
+        source["Inventory"][0]["Amount"] = "999.00"
+        source["Inventory"][0]["AmountTotal"] = "1048.95"
+    if kind != "source":
+        from decimal import Decimal
+        source["DocumentAmount"] = str(sum((Decimal(row["AmountTotal"]) for row in source["Inventory"]), Decimal(0)))
     press(flow, data)
     assert "документ не создавался" not in flow["sent"][-1]["text"]
     assert not flow["client"].app.state.bot.pending
@@ -195,8 +387,9 @@ def test_foreign_currency_gross_price_and_wrong_financial_span_are_not_accepted(
                             ("В первой строке цена 1500 с НДС", "1500"),
                             ("Во 2 строке цена 1500, НДС 5%", "2")]:
         before = len(flow["fixture"].calls)
+        token = flow["client"].app.state.bot.pending[123].token
         send(flow, text, [price(text, fragment, 1)])
-        assert not flow["client"].app.state.bot.pending
+        assert flow["client"].app.state.bot.pending[123].token == token
         assert len(flow["fixture"].calls) == before
 
 
@@ -206,7 +399,8 @@ def test_source_drift_preserves_explicit_values_but_requires_new_confirmation(fl
     old = prepared(flow)
     source = flow["fixture"].records["Document_InventoryExpense"][0]
     source["Inventory"][0] = flow["fixture"].line(1, "1", "1100")
-    source["DocumentAmount"] = "3255.00"
+    from decimal import Decimal
+    source["DocumentAmount"] = str(sum((Decimal(row["AmountTotal"]) for row in source["Inventory"]), Decimal(0)))
     press(flow, button(flow))
     updated = prepared(flow)
     assert updated.preview.lines[0].price == 1500
@@ -259,8 +453,9 @@ def test_ambiguous_tax_catalog_and_deleted_tax_on_refresh_fail_closed(flow):
     duplicate = {**zero, "Ref_Key": ref(15)}
     flow["fixture"].records["Catalog_VATRates"].append(duplicate)
     text = "В первой строке НДС 0%"
+    token = flow["client"].app.state.bot.pending[123].token
     send(flow, text, [tax(text, "0%", 1)])
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
     flow["fixture"].records["Catalog_VATRates"].remove(duplicate)
     send(flow, text, [tax(text, "0%", 1)])
     assert prepared(flow).preview.lines[0].tax.rate == 0
@@ -270,12 +465,13 @@ def test_ambiguous_tax_catalog_and_deleted_tax_on_refresh_fail_closed(flow):
 
 
 def test_model_cannot_supply_price_or_ids_instead_of_source_spans(flow):
+    token = flow["client"].app.state.bot.pending[123].token
     for fabricated in ({"kind": "price", "line_number": 1, "price": "1500"},
                        {"kind": "description", "line_number": 1, "description_span": {"first_word": 1, "last_word": 1},
                         "service_id": ref(91)}):
         before = len(flow["fixture"].calls)
         send(flow, "Цена 1500", [fabricated])
-        assert not flow["client"].app.state.bot.pending
+        assert flow["client"].app.state.bot.pending[123].token == token
         assert len(flow["fixture"].calls) == before
 
 
@@ -283,9 +479,10 @@ def test_model_cannot_supply_price_or_ids_instead_of_source_spans(flow):
     ("Во второй строке цена 1500", 1, "price"), ("Во второй строке НДС 0%", None, "tax")])
 def test_model_cannot_invent_row_or_drop_explicit_tax_target(flow, text, row, kind):
     before = len(flow["fixture"].calls)
+    token = flow["client"].app.state.bot.pending[123].token
     change = price(text, "1500", row) if kind == "price" else tax(text, "0%", row)
     send(flow, text, [change])
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
     assert len(flow["fixture"].calls) == before
 
 
@@ -307,9 +504,10 @@ def test_duplicate_model_catalog_addition_is_only_display_rename(flow):
 def test_model_cannot_invent_tax_mode_without_tax_evidence(flow):
     text = "В первой строке цена 1500"
     before = len(flow["fixture"].calls)
+    token = flow["client"].app.state.bot.pending[123].token
     send(flow, text, [{"kind": "tax", "line_number": 1, "source_span": span(text, "цена 1500"),
         "mode": "without_tax", "rate_span": None, "profile_span": None}])
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
     assert len(flow["fixture"].calls) == before
 
 
@@ -358,6 +556,7 @@ def test_model_tax_label_is_normalized_from_literal_percentage_and_rename_prefix
 def test_model_create_label_on_field_patch_is_repaired_only_for_existing_scope(flow, new_scope):
     text = ("Создай новый счёт, " if new_scope else "") + "В первой строке цена 1500"
     old = button(flow)
+    token = old.split(":")[-1]
     before = len(flow["fixture"].calls)
     flow["outputs"].append({"action": "create", "client_change": None, "date_change": None,
         "period_change": None, "line_changes": [], "tax_change": None,
@@ -365,7 +564,7 @@ def test_model_create_label_on_field_patch_is_repaired_only_for_existing_scope(f
         "preview_changes": [price(text, "1500", 1)]})
     send(flow, text)
     if new_scope:
-        assert not flow["client"].app.state.bot.pending
+        assert flow["client"].app.state.bot.pending[123].token == token
         assert len(flow["fixture"].calls) == before
     else:
         assert prepared(flow).preview.lines[0].price == 1500
@@ -393,8 +592,9 @@ def test_legacy_rename_and_duplicate_identical_tax_are_one_grounded_patch(flow):
 def test_different_tax_values_in_one_message_still_fail_closed(flow):
     text = "В первой строке НДС 0% и НДС 5%"
     before = len(flow["fixture"].calls)
+    token = flow["client"].app.state.bot.pending[123].token
     send(flow, text, [tax(text, "0%", 1), tax(text, "5%", 1)])
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
     assert len(flow["fixture"].calls) == before
 
 
@@ -407,6 +607,7 @@ def test_explicit_final_rename_keeps_last_word_omitted_by_model_span(flow):
 def test_rename_literal_cannot_move_from_explicit_second_row_to_first(flow):
     text = "В первой строке цена 1500. Во второй строке назови услугу Новое обслуживание"
     before = len(flow["fixture"].calls)
+    token = flow["client"].app.state.bot.pending[123].token
     send(flow, text, [name(text, "цена 1500.", 1)])
-    assert not flow["client"].app.state.bot.pending
+    assert flow["client"].app.state.bot.pending[123].token == token
     assert len(flow["fixture"].calls) == before

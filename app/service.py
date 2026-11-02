@@ -7,6 +7,7 @@ from datetime import date, datetime, timezone
 from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCandidates, ClientChoiceRequired, Invoice, InvoiceCommand, InvoiceConflict, InvoiceResult, OneC,
                         OperationState, PdfDocument, PreparedInvoice, ResolvedClient,
                         ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection, ResolvedPreviewLineOverride,
+                        PreviewLineOrigin,
                         ServiceProblem, ServiceChoiceRequired, InitialQuantityRequired, StaleBasis, StrictModel, UserProblem,
                         WorkflowFailure, WritesDisabled, TaxInvoice, TaxInvoiceReference, TaxInvoicePdf, TaxOperationState)
 from app.operations import MutationUncertain, OperationJournal
@@ -74,7 +75,8 @@ class InvoiceService:
                       existing: PreparedInvoice | None = None,
                       old_command: InvoiceCommand | None = None,
                       selected_client_id: str | None = None, require_client_choice: bool = False,
-                      selected_service_ids: dict[int, str] | None = None) -> PreparedInvoice:
+                      selected_service_ids: dict[int, str] | None = None,
+                      selected_line_origins: dict[int, PreviewLineOrigin] | None = None) -> PreparedInvoice:
         resolution_step = "client"
         try:
             command = InvoiceCommand.model_validate(command)
@@ -96,24 +98,62 @@ class InvoiceService:
             resolution_step = "service"
             for number, selected in enumerate(command.services, 1):
                 cached = None
+                origin = (selected_line_origins or {}).get(number)
                 if existing is not None and old_command is not None and client.client_id == existing.request.client_id:
                     for old, resolved_old in zip(old_command.services, existing.request.services):
                         if old.query == selected.query:
                             cached = resolved_old.service_id
                             break
+                if origin is not None:
+                    cached = origin.service_id
                 try:
                     chosen = (selected_service_ids or {}).get(number)
-                    service_id = (ResolvedService.model_validate(await asyncio.wait_for(
-                        self.onec.resolve_service(client.client_id, selected.query, selected_id=chosen), self.timeout)).service_id
-                        if chosen is not None else cached or ResolvedService.model_validate(await asyncio.wait_for(
-                        self.onec.resolve_service(client.client_id, selected.query), self.timeout)).service_id)
+                    if origin is not None:
+                        chosen = origin.service_id
+                    if (chosen is None and existing is not None and old_command is None
+                            and getattr(selected, "service_id", None) is not None):
+                        chosen = selected.service_id
+                    slot_changed = (origin is None and existing is not None and old_command is not None
+                        and number <= len(old_command.services)
+                        and (old_command.services[number - 1].query != selected.query
+                             or number <= len(existing.preview.lines)
+                             and existing.preview.lines[number - 1].description != selected.query))
+                    if slot_changed:
+                        chosen = None
+                        cached = None
+                    if cached is not None and chosen is not None and chosen != cached:
+                        chosen = cached
+                    if cached is not None and chosen in (None, cached):
+                        service_id = cached
+                    else:
+                        service_id = (ResolvedService.model_validate(await asyncio.wait_for(
+                            self.onec.resolve_service(client.client_id, selected.query, selected_id=chosen), self.timeout)).service_id
+                            if chosen is not None else ResolvedService.model_validate(await asyncio.wait_for(
+                            self.onec.resolve_service(client.client_id, selected.query), self.timeout)).service_id)
                     if chosen is not None and chosen != service_id:
                         raise ValueError("Provider changed the selected service")
                 except ServiceChoiceRequired as exc:
                     raise ServiceChoiceRequired(exc.choices, number) from None
                 except UserProblem as exc:
                     raise ServiceProblem(str(exc), number) from None
-                selections.append(ResolvedServiceSelection(service_id=service_id, quantity=selected.quantity))
+                if (origin is None and existing is not None
+                        and len(command.services) == len(existing.preview.lines)
+                        and number <= len(existing.preview.lines)):
+                    old_line = existing.preview.lines[number - 1]
+                    if (old_line.service_id == service_id and old_line.source_id is not None
+                            and old_line.source_line_number is not None):
+                        origin = PreviewLineOrigin(service_id=service_id, source_id=old_line.source_id,
+                            source_line_number=old_line.source_line_number)
+                source_id = getattr(selected, "source_id", None)
+                source_line_number = getattr(selected, "source_line_number", None)
+                if origin is None and source_id is not None and source_line_number is not None:
+                    origin = PreviewLineOrigin(service_id=service_id, source_id=source_id,
+                        source_line_number=source_line_number)
+                if origin is not None and origin.service_id != service_id:
+                    raise UserProblem("Идентичность строки изменилась. Подготовьте preview заново.")
+                selections.append(ResolvedServiceSelection(service_id=service_id, quantity=selected.quantity,
+                    source_id=origin.source_id if origin else None,
+                    source_line_number=origin.source_line_number if origin else None))
             period = command.period
             resolution_step = "basis"
             overrides = []
@@ -124,17 +164,26 @@ class InvoiceService:
                 source = existing.preview.historical_proposal
                 source_id = source.source_id if source else None
                 for edit in command.preview_overrides:
-                    if edit.line_number > len(existing.preview.lines):
-                        raise UserProblem("В preview нет такой строки.")
+                    origin = (selected_line_origins or {}).get(edit.line_number)
+                    if origin is not None:
+                        source_line_number, edit_source_id = origin.source_line_number, origin.source_id
+                        if origin.service_id != selections[edit.line_number - 1].service_id:
+                            raise UserProblem("Строка правки изменилась. Подготовьте preview заново.")
+                    else:
+                        if edit.line_number > len(existing.preview.lines):
+                            raise UserProblem("В preview нет такой строки.")
+                        old_line = existing.preview.lines[edit.line_number - 1]
+                        source_line_number = old_line.source_line_number
+                        edit_source_id = old_line.source_id or source_id
                     overrides.append(ResolvedPreviewLineOverride(**edit.model_dump(),
-                        source_line_number=existing.preview.lines[edit.line_number - 1].source_line_number,
-                        source_id=existing.preview.lines[edit.line_number - 1].source_id or source_id))
+                        source_line_number=source_line_number, source_id=edit_source_id))
             resolved = ResolvedInvoiceCommand(
                 client_id=client.client_id, year=period.year if period else None, month=period.month if period else None,
                 invoice_date=command.invoice_date or date.today(), service_period=period,
                 services=tuple(selections), tax=command.tax, previous=command.previous,
                 legacy_period=command.legacy_period or (command.invoice_date is None and command.year is not None),
-                preview_overrides=tuple(overrides), preview_source_id=source_id,
+                preview_overrides=tuple(overrides), preview_source_id=(
+                    next((selection.source_id for selection in selections if selection.source_id), source_id)),
             )
             basis = BillingBasis.model_validate(await asyncio.wait_for(
                 self.onec.resolve_basis(resolved), self.timeout))
@@ -194,8 +243,12 @@ class InvoiceService:
                 "year": supplied_period.year if supplied_period else None,
                 "month": supplied_period.month if supplied_period else None,
                 "services": tuple(
-                ResolvedServiceSelection(service_id=line.service_id, quantity=line.quantity)
-                for line in basis.preview.lines)})
+                ResolvedServiceSelection(service_id=line.service_id, quantity=line.quantity,
+                    source_id=selections[index].source_id if len(selections) == len(basis.preview.lines) else None,
+                    source_line_number=selections[index].source_line_number if len(selections) == len(basis.preview.lines) else None)
+                for index, line in enumerate(basis.preview.lines)),
+                "preview_source_id": (next((line.source_id for line in basis.preview.lines if line.source_id), None)
+                    or resolved.preview_source_id)})
             prepared = PreparedInvoice(request=resolved, basis=basis, display_name=client.display_name)
             event(request_id=request_id, user_id=user_id, stage="resolve", status="success",
                   operation_id=prepared.operation_id)

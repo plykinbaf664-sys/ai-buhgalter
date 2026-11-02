@@ -12,13 +12,14 @@ from app.ai import CommandInterpreter
 from app.domain import (ClientCandidate, ClientCandidates, ClientChoiceRequired, InvoiceCommand, PreparedInvoice, ResolvedClient,
                         ServiceCandidates, ServiceChoiceRequired,
                         InitialQuantityRequired,
-                        Label, ServiceProblem, ServiceSelection, StrictModel, UserProblem, WorkflowFailure)
+                        Label, PreviewLineOrigin, ServiceProblem, ServiceSelection, StrictModel, UserProblem, WorkflowFailure)
 from app.http import ExternalFailure
 from app.service import InvoiceService, event, safe_backend_error
 from app.telegram import DeliveryFailure, Telegram
 from app.telegram_models import CallbackQuery, InlineButton, InlineKeyboardMarkup, Message
 from app.voice import SpeechToText, UncertainTranscript
-from app.intent import InvoiceDraft, InvoiceIntent, IntentPreviewChange, merge_intent
+from app.intent import (InvoiceDraft, InvoiceIntent, IntentPreviewChange, apply_draft_mutations,
+                        merge_intent)
 from app.domain import PreviewTaxRequest
 from app.numbers import explicit_decimal, explicit_tax_rate
 from app.language import explicit_line_target, normalize_request_text, company_search_phrase, service_refinement_phrase
@@ -107,6 +108,8 @@ class DraftContext(StrictModel):
     supplier_review: SupplierReviewScope | None = None
     require_client_choice: bool = False
     selected_service_ids: dict[int, str] = Field(default_factory=dict)
+    line_ids: tuple[str, ...] = Field(default=(), max_length=20)
+    line_origins: dict[str, PreviewLineOrigin] = Field(default_factory=dict)
 
 
 class DeliveredInvoice(StrictModel):
@@ -161,6 +164,33 @@ class Bot:
                        and previous_context.draft.client == command.client else None)
         supplier_review = (previous_context.supplier_review if previous_context is not None
                            and previous_context.draft.client == command.client else None)
+        expected_ids = (previous_context.line_ids if previous_context is not None
+                        and previous_context.draft.client == command.client else ())
+        old_origins = (previous_context.line_origins if previous_context is not None
+                       and previous_context.draft.client == command.client else {})
+        old_by_origin = {(origin.source_id, origin.source_line_number, origin.service_id): line_id
+                         for line_id, origin in old_origins.items()}
+        line_ids = []
+        line_origins = {}
+        for index, line in enumerate(prepared.preview.lines):
+            origin = (PreviewLineOrigin(service_id=line.service_id, source_id=line.source_id,
+                source_line_number=line.source_line_number)
+                if line.source_id is not None and line.source_line_number is not None else None)
+            old_id = (old_by_origin.get((origin.source_id, origin.source_line_number, origin.service_id))
+                      if origin is not None else None)
+            if old_id is None and len(expected_ids) == len(prepared.preview.lines):
+                old_id = expected_ids[index]
+            if old_id is None and previous_context is not None and index < len(previous_context.line_ids):
+                old_line = (previous_context.prepared.preview.lines[index]
+                    if previous_context.prepared and index < len(previous_context.prepared.preview.lines) else None)
+                if old_line is not None and old_line.service_id == line.service_id and old_line.description == line.description:
+                    old_id = previous_context.line_ids[index]
+            line_id = old_id or (f"source:{origin.source_id}:{origin.source_line_number}" if origin else "draft:" + secrets.token_hex(16))
+            if line_id in line_ids:
+                line_id = "draft:" + secrets.token_hex(16)
+            line_ids.append(line_id)
+            if origin is not None:
+                line_origins[line_id] = origin
         command = InvoiceCommand.model_validate({**command.model_dump(),
             "initial_overrides": (),
             "preview_overrides": prepared.preview.user_overrides,
@@ -171,7 +201,9 @@ class Bot:
                               for line in prepared.preview.lines)})
         self.contexts[uid] = DraftContext(draft=InvoiceDraft.from_command(command), command=command,
                                          prepared=prepared, selected_client_id=selected_id,
-                                         supplier_review=supplier_review)
+                                         supplier_review=supplier_review,
+                                         selected_service_ids={i + 1: line.service_id for i, line in enumerate(prepared.preview.lines)},
+                                         line_ids=tuple(line_ids), line_origins=line_origins)
         scope = SupplierReviewScope.from_prepared(prepared)
         if scope is not None and scope != supplier_review:
             self.pending.pop(uid, None)
@@ -217,7 +249,7 @@ class Bot:
         pending = self.supplier_reviews.get(uid)
         if (not match or pending is None or time.monotonic() > pending.expires_at
                 or not hmac.compare_digest(match[1], pending.token)):
-            raise UserProblem("Выбор образца устарел. Пришлите запрос заново.")
+            raise UserProblem("Эта кнопка относится к предыдущей версии preview. Используйте кнопки в последнем сообщении; запрос повторять не нужно.")
         self.supplier_reviews.pop(uid)
         if match[2] == "cancel":
             self.contexts.pop(uid, None)
@@ -309,9 +341,11 @@ class Bot:
             choices=exc.choices, expires_at=time.monotonic() + 300)
         self.service_choices[uid] = pending
         context = self.contexts[uid]
-        draft = InvoiceDraft(**{**context.draft.model_dump(), "unresolved_line": exc.line_number})
+        # Preserve the complete attempted candidate draft, including any rows
+        # added or replaced in the message that required this service choice.
+        draft = InvoiceDraft(**{**InvoiceDraft.from_command(command).model_dump(),
+            "unresolved_line": exc.line_number})
         self.contexts[uid] = DraftContext(**{**context.model_dump(), "draft": draft})
-        self.pending.pop(uid, None)
         buttons = [[InlineButton(text=(f"{i}. {item.display_name[:45]}" + (f" · {item.code}" if item.code else ""))[:64],
             callback_data=f"service:{pending.token}:{i}")] for i, item in enumerate(exc.choices.candidates, 1)]
         buttons.append([InlineButton(text="Отмена", callback_data=f"service:{pending.token}:cancel")])
@@ -431,7 +465,7 @@ class Bot:
         pending = self.pending.get(uid)
         if (pending is None or time.monotonic() > pending.expires_at
                 or not hmac.compare_digest(action.token, pending.token)):
-            raise UserProblem("Подтверждение устарело. Пришлите команду заново.")
+            raise UserProblem("Эта кнопка относится к предыдущей версии preview. Используйте кнопки в последнем сообщении; запрос повторять не нужно.")
         if action.action == "cancel":
             self.pending.pop(uid)
             self.contexts.pop(uid, None)
@@ -459,7 +493,6 @@ class Bot:
         if is_voice:
             if uid in self.recoveries:
                 raise UserProblem("Сначала восстановите предыдущую операцию командой /retry. Новый счёт пока не создаём.")
-            self.pending.pop(uid, None)
             if self.speech is None:
                 raise UserProblem("Сейчас доступен только текст. Пришлите компанию и дату счёта.")
             if message.text is not None:
@@ -537,8 +570,8 @@ class Bot:
             return await self.confirm(uid, pending, request_id)
         event(request_id=request_id, user_id=uid, stage="interpret", status="started")
         context = self.contexts.get(uid)
-        # Any attempted edit revokes the old confirmation before parsing/resolution.
-        self.pending.pop(uid, None)
+        prior_context = context
+        prior_pending = self.pending.get(uid)
         if getattr(self.service.onec, "preview_only", False) is True:
             query = service_refinement_phrase(text) if previous_service is not None else company_search_phrase(text)
             if query is not None:
@@ -583,15 +616,44 @@ class Bot:
         if interpretation.command is not None:
             command = interpretation.command
             context = None
+            self.pending.pop(uid, None)
         else:
             intent = interpretation.intent
             if intent.action == "cancel":
+                self.pending.pop(uid, None)
                 self.contexts.pop(uid, None)
                 return "Команда отменена. Документ не создавался."
             if intent.action == "reject":
                 raise UserProblem("Укажите запрос на счёт или изменение его полей. В готовом preview можно явно изменить цену, НДС или название услуги.")
             if context is None and intent.client is None:
                 context = self.last_contexts.get(uid)
+            if intent.draft_mutations:
+                if (context is None or context.prepared is None or context.command is None
+                        or intent.client is not None or intent.services or intent.invoice_date is not None
+                        or intent.service_period is not None or intent.initial_overrides or intent.preview_changes):
+                    raise UserProblem("Для изменения строк нужен текущий preview. Сначала сформируйте счёт, затем правьте его строки.")
+                command, line_ids, origins, selected_ids, issues = apply_draft_mutations(
+                    context.prepared, context.command, context.line_ids,
+                    context.line_origins, intent.draft_mutations)
+                if command == context.command:
+                    return "\n".join(issues) if issues else "В preview уже указаны эти значения. Подтверждение остаётся действительным."
+                prior_pending = self.pending.get(uid)
+                base = InvoiceDraft.from_command(command)
+                self.contexts[uid] = DraftContext(draft=base, command=command, prepared=context.prepared,
+                    selected_client_id=context.selected_client_id, supplier_review=context.supplier_review,
+                    require_client_choice=context.require_client_choice, selected_service_ids=selected_ids,
+                    line_ids=line_ids, line_origins=origins)
+                try:
+                    result = await self.prepare_command(uid, command, request_id, self.contexts[uid])
+                except (UserProblem, WorkflowFailure):
+                    self.contexts[uid] = context
+                    if prior_pending is not None:
+                        self.pending[uid] = prior_pending
+                    raise
+                if issues:
+                    notice = "Применил однозначные правки. Уточните только эту часть:\n" + "\n".join(issues) + "\n\n"
+                    result = ConfirmationPrompt(text=notice + result.text, reply_markup=result.reply_markup) if isinstance(result, ConfirmationPrompt) else result
+                return result
             if (intent.tax is not None and intent.tax.mode != "default" and context is not None
                     and (context.prepared is not None or context.draft.initial_overrides)
                     and getattr(self.service.onec, "preview_only", False) is True):
@@ -630,16 +692,21 @@ class Bot:
                         raise UserProblem(f"В preview валюта {context.prepared.preview.currency}. Укажите цену в этой валюте; конвертация не выполняется.")
             base = context.draft if context else InvoiceDraft()
             if intent.action == "create" and intent.client is not None:
+                self.pending.pop(uid, None)
                 base, context = InvoiceDraft(), None
             draft = merge_intent(base, intent)
+            same_lines = (context is not None and draft.client == context.draft.client
+                and len(draft.services) == len(context.draft.services)
+                and all(new.query == old.query for new, old in zip(draft.services, context.draft.services)))
             self.contexts[uid] = DraftContext(draft=draft, command=context.command if context else None,
                                             prepared=context.prepared if context else None,
                                             selected_client_id=context.selected_client_id if context
                                                 and draft.client == context.draft.client else None,
                                             supplier_review=context.supplier_review if context
                                                 and draft.client == context.draft.client else None,
-                                            selected_service_ids=context.selected_service_ids if context
-                                                and draft.client == context.draft.client and draft.services == context.draft.services else {})
+                                            selected_service_ids=context.selected_service_ids if same_lines else {},
+                                            line_ids=context.line_ids if same_lines else (),
+                                            line_origins=context.line_origins if same_lines else {})
             if intent.action == "clarify":
                 messages = {"client": "Уточните компанию.", "date": "Уточните дату счёта.",
                             "service": "Уточните название услуги.", "tax": "Уточните налоговый режим.",
@@ -655,6 +722,8 @@ class Bot:
             try:
                 command = draft.command()
             except UserProblem:
+                if prior_context is not None:
+                    self.contexts[uid] = prior_context
                 if (getattr(self.service.onec, "preview_only", False) is True and draft.client is not None
                         and draft.invoice_date is None and draft.service_period is None
                         and self.contexts[uid].selected_client_id is None and not draft.preview_overrides):
@@ -665,7 +734,16 @@ class Bot:
         if uncertain_voice is not None:
             self.contexts[uid] = DraftContext.model_validate({**self.contexts[uid].model_dump(),
                 "require_client_choice": True})
-        result = await self.prepare_command(uid, command, request_id, context)
+        try:
+            result = await self.prepare_command(uid, command, request_id, context)
+        except (UserProblem, WorkflowFailure):
+            unresolved_service = (self.contexts.get(uid) is not None
+                and self.contexts[uid].draft.unresolved_line is not None)
+            if prior_context is not None and not unresolved_service:
+                self.contexts[uid] = prior_context
+            if prior_pending is not None and not unresolved_service:
+                self.pending[uid] = prior_pending
+            raise
         if uncertain_voice is not None and isinstance(result, ConfirmationPrompt):
             result = ConfirmationPrompt(text=("Я услышал неуверенно: «" + text + "»\n"
                 "Выберите компанию ниже. Затем проверьте дату, количество и налог в preview.\n\n" + result.text),
@@ -679,7 +757,10 @@ class Bot:
                 existing=context.prepared if context else None, old_command=context.command if context else None,
                 selected_client_id=self.contexts[uid].selected_client_id,
                 require_client_choice=self.contexts[uid].require_client_choice,
-                selected_service_ids=self.contexts[uid].selected_service_ids)
+                selected_service_ids=self.contexts[uid].selected_service_ids,
+                selected_line_origins={index + 1: self.contexts[uid].line_origins[line_id]
+                    for index, line_id in enumerate(self.contexts[uid].line_ids)
+                    if line_id in self.contexts[uid].line_origins})
         except ClientChoiceRequired as exc:
             event(request_id=request_id, user_id=uid, stage="client_choice", status="required")
             return self.show_client_choices(uid, command, exc.choices)
@@ -699,9 +780,9 @@ class Bot:
                     [InlineButton(text="Отмена", callback_data=f"initialqty:{pending.token}:cancel")]]))
         except ServiceProblem as exc:
             saved = self.contexts[uid]
-            draft = InvoiceDraft.model_validate({**saved.draft.model_dump(), "unresolved_line": exc.line_number})
-            self.contexts[uid] = DraftContext(draft=draft, command=saved.command, prepared=saved.prepared,
-                                             selected_client_id=saved.selected_client_id, supplier_review=saved.supplier_review)
+            draft = InvoiceDraft.model_validate({**InvoiceDraft.from_command(command).model_dump(),
+                "unresolved_line": exc.line_number})
+            self.contexts[uid] = DraftContext(**{**saved.model_dump(), "draft": draft})
             raise
         event(request_id=request_id, user_id=uid, stage="interpret", status="success")
         return self.show_preview(uid, prepared, command)

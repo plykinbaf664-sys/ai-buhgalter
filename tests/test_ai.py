@@ -295,7 +295,7 @@ def test_confirmation_is_bound_to_user(ai_harness):
     prompt = confirmation(sent)
     assert press(client, prompt, 2, uid=456).status_code == 200
     assert not backend.documents
-    assert "устарело" in json.loads(sent[-1].content)["text"]
+    assert "предыдущей версии preview" in json.loads(sent[-1].content)["text"]
     assert press(client, prompt, 3).status_code == 200
     assert len(backend.documents) == 1
 

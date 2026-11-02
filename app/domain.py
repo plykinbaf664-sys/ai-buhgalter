@@ -36,6 +36,20 @@ class ServiceSelection(StrictModel):
 class ResolvedServiceSelection(StrictModel):
     service_id: Label
     quantity: Quantity | None = None
+    source_id: Label | None = None
+    source_line_number: int | None = Field(default=None, ge=1, le=2**63 - 1)
+
+    @model_validator(mode="after")
+    def source_pair(self):
+        if (self.source_id is None) != (self.source_line_number is None):
+            raise ValueError("Historical line identity requires both source and line number")
+        return self
+
+
+class PreviewLineOrigin(StrictModel):
+    service_id: Label
+    source_id: Label
+    source_line_number: int = Field(ge=1, le=2**63 - 1)
 
 
 class ResolvedService(StrictModel):
