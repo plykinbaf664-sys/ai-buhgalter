@@ -145,6 +145,12 @@ def draft_change(text, kind, *, target=None, service=None, quantity=None,
             "description_span": span(text, description) if description else None}
 
 
+def initial_line(text, service, quantity=None, price=None):
+    return {"service_span": span(text, service),
+        "quantity": {"source_span": span(text, quantity[0]), "value": quantity[1]} if quantity else None,
+        "price_span": span(text, price) if price else None, "amount_span": None, "tax": None}
+
+
 def send_draft_changes(flow, text, changes, *, voice=False):
     flow["outputs"].append({"action": "edit", "client_change": None, "date_change": None,
         "period_change": None, "line_changes": [], "tax_change": None,
@@ -270,6 +276,93 @@ def test_live_wording_applies_multi_item_batch_and_legacy_quantity(flow, legacy_
     press(flow, old_button)
     assert "последнем сообщении" in flow["sent"][-1]["text"]
     assert {request.method for request in flow["fixture"].calls} == {"GET"}
+
+
+def test_edit_misclassified_as_initial_lines_recovers_existing_preview(flow):
+    original = prepared(flow)
+    old_confirmation = button(flow)
+    service_name = original.preview.lines[0].description
+    text = f"Сформируй счёт: пункт 1 {service_name} сделай 3 штуки по цене 1260 соответственно"
+    flow["outputs"].append({"action": "edit", "client_change": None, "date_change": None,
+        "period_change": None, "line_changes": [], "tax_change": None,
+        "previous_hint_request": None, "clarification": None, "preview_changes": [],
+        "initial_lines": [initial_line(text, service_name, ("3", 3), "1260")],
+        "draft_changes": []})
+    send(flow, text)
+    updated = prepared(flow)
+    assert updated.preview.lines[0].quantity == 3
+    assert updated.preview.lines[0].service_id == original.preview.lines[0].service_id
+    assert updated.preview.total != original.preview.total
+    assert updated.request.client_id == original.request.client_id
+    assert updated.preview.historical_proposal.contract_id == original.preview.historical_proposal.contract_id
+    assert button(flow) != old_confirmation
+    assert "Пункт 1." in flow["sent"][-1]["text"]
+    request = json.loads(flow["calls"][-1].content)
+    assert "draft_changes" in request["text"]["format"]["schema"]["properties"]
+
+
+@pytest.mark.parametrize("text,quantity,target", [
+    ("Пункт 1 услугу поставь 3 штуки по цене 1260", 3, "пункт 1"),
+    ("Для пункта 2 количество 4 шт., цена 1260", 4, "пункта 2"),
+])
+def test_quantity_grounding_uses_quantity_marker_not_adjacent_price(text, quantity, target):
+    from app.language import SourceSpan, grounded_quantity
+    bad_span = span(text, "3 штуки по цене 1260") if quantity == 3 else span(text, "4 шт., цена 1260")
+    assert grounded_quantity(text, SourceSpan(**bad_span), Decimal(quantity)) == Decimal(quantity)
+
+
+@pytest.mark.parametrize("flow", [3], indirect=True)
+def test_keep_named_items_and_remove_everything_else_is_one_preview_mutation(flow):
+    original = prepared(flow)
+    old_confirmation = button(flow)
+    names = [line.description for line in original.preview.lines]
+    text = f"Оставь {names[0]} и {names[1]}, остальные пункты удали"
+    send_draft_changes(flow, text, [
+        draft_change(text, "retain", target=names[0]),
+        draft_change(text, "retain", target=names[1]),
+    ])
+    updated = prepared(flow)
+    assert len(updated.preview.lines) == 2
+    assert updated.preview.lines[0].service_id == original.preview.lines[0].service_id
+    assert updated.preview.lines[1].description == names[1]
+    assert button(flow) != old_confirmation
+
+
+def test_ambiguous_keep_target_never_removes_unselected_items(flow):
+    original = prepared(flow)
+    old_confirmation = button(flow)
+    text = "Оставь Bookkeeping synthetic, остальные удали"
+    send_draft_changes(flow, text, [draft_change(text, "retain", target="Bookkeeping synthetic")])
+    assert prepared(flow) == original
+    assert flow["client"].app.state.bot.pending[123].token == old_confirmation.split(":")[-1]
+    assert "несколькими строками" in flow["sent"][-1]["text"]
+
+
+@pytest.mark.parametrize("flow", [1], indirect=True)
+def test_service_target_tolerates_small_transcription_typo_but_preserves_identity(flow):
+    original = prepared(flow)
+    service_name = original.preview.lines[0].description
+    typo = service_name.replace("synthetic", "synthetik")
+    text = f"{typo} сделай 4 штуки"
+    send_draft_changes(flow, text, [draft_change(text, "update", target=typo,
+        quantity=("4", 4))])
+    updated = prepared(flow)
+    assert updated.preview.lines[0].service_id == original.preview.lines[0].service_id
+    assert updated.preview.lines[0].quantity == 4
+
+
+@pytest.mark.parametrize("flow", [3], indirect=True)
+def test_batch_edit_delete_and_service_quantity_preserve_original_targets(flow):
+    original = prepared(flow)
+    text = "Пункт 2 исправь на 4 штуки, пункт 3 удали"
+    send_draft_changes(flow, text, [
+        draft_change(text, "update", target="Пункт 2", quantity=("4", 4)),
+        draft_change(text, "delete", target="пункт 3"),
+    ])
+    updated = prepared(flow)
+    assert len(updated.preview.lines) == len(original.preview.lines) - 1
+    assert updated.preview.lines[1].quantity == 4
+    assert updated.preview.total == updated.preview.subtotal + updated.preview.tax_amount
 
 
 @pytest.mark.parametrize("text,fragment,expected", [

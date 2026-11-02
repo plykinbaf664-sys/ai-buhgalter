@@ -1,5 +1,6 @@
 """LLM transport: word spans refer to the current message, never invented names."""
 import re
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -218,7 +219,7 @@ class InitialLineChange(StrictModel):
 
 
 class DraftLineChange(StrictModel):
-    kind: Literal["update", "delete", "add", "replace"]
+    kind: Literal["update", "delete", "add", "replace", "retain"]
     target_span: SourceSpan | None = Field(description="Words identifying a CURRENT preview line: row/item number, ordinal, or service name. Null only for add.")
     service_span: SourceSpan | None = Field(description="Literal new service name for add/replace; null otherwise.")
     quantity: SourceQuantity | None = Field(description="Explicit new quantity, if requested; otherwise null.")
@@ -232,8 +233,8 @@ class DraftLineChange(StrictModel):
             raise ValueError("Only an add operation has no existing target")
         if (self.kind in ("add", "replace")) != (self.service_span is not None):
             raise ValueError("Add/replace requires a literal service name")
-        if self.kind == "delete" and any((self.quantity, self.price_span, self.tax, self.description_span)):
-            raise ValueError("Delete cannot also edit the deleted line")
+        if self.kind in ("delete", "retain") and any((self.quantity, self.price_span, self.tax, self.description_span)):
+            raise ValueError("Delete/retain cannot also edit a line")
         if self.kind == "update" and not any((self.quantity, self.price_span, self.tax, self.description_span)):
             raise ValueError("Update requires at least one changed field")
         if self.kind in ("add", "replace") and self.description_span is not None:
@@ -333,6 +334,73 @@ def explicit_line_target(source: str, start: int) -> int | None:
     return preceding[-1] if preceding else anchors[0][1] if len(anchors) == 1 else None
 
 
+def explicit_line_reference_span(source: str, start: int, end_word: int) -> SourceSpan | None:
+    """Include an explicit displayed item number with a following service label."""
+    tokens = words(source)
+    end = tokens[end_word - 1].end()
+    anchor = re.compile(r"\b(?:строк[а-яё]*|пункт[а-яё]*|позици[а-яё]*|элемент[а-яё]*|item|line)\s*(?:номер\s*|№\s*)?\d+|"
+        r"\b\d+(?:-[а-я]+)?\s+(?:строк[а-яё]*|пункт[а-яё]*|позици[а-яё]*|элемент[а-яё]*|item|line)\b|"
+        r"\b(?:перв|втор|трет|четв[её]рт|пят|шест|седьм|восьм|девят|десят|одиннадцат|двенадцат|"
+        r"тринадцат|четырнадцат|пятнадцат|шестнадцат|семнадцат|восемнадцат|девятнадцат|двадцат)[а-яё]*\s+"
+        r"(?:строк[а-яё]*|пункт[а-яё]*|позици[а-яё]*|элемент[а-яё]*|item|line)\b", re.I)
+    matches = [match for match in anchor.finditer(source) if match.start() <= start]
+    if not matches:
+        return None
+    match = matches[-1]
+    if start - match.end() > 80:
+        return None
+    first = next((index for index, token in enumerate(tokens, 1) if token.start() >= match.start()), None)
+    if first is None:
+        return None
+    return SourceSpan(first_word=first, last_word=end_word)
+
+
+def grounded_quantity(source: str, span: SourceSpan, expected: Decimal,
+                      target_span: SourceSpan | None = None) -> Decimal:
+    """Decode a quantity from its evidence, repairing only a misaligned model span."""
+    try:
+        decoded = explicit_decimal(span.text(source), places=3)
+        if decoded == expected:
+            return decoded
+    except UserProblem:
+        pass
+
+    tokens = words(source)
+    target_offset = (tokens[target_span.first_word - 1].start()
+                     if target_span is not None else None)
+    quantity_units = re.compile(r"^(?:штук\w*|шт\.?|единиц\w*|pcs|pieces|units)$", re.I)
+    quantity_labels = re.compile(r"^(?:количеств\w*|quantity|qty)$", re.I)
+    candidates: list[tuple[int, int, int, Decimal]] = []
+    for index, token in enumerate(tokens):
+        token_text = source[token.start():token.end()].casefold().replace("ё", "е")
+        ranges = []
+        if quantity_units.fullmatch(token_text):
+            ranges.extend((first, index - 1) for first in range(max(0, index - 6), index))
+        if quantity_labels.fullmatch(token_text):
+            first = index + 1
+            if first < len(tokens) and source[tokens[first].start():tokens[first].end()].casefold() in ("на", "до", "=", ":"):
+                first += 1
+            ranges.extend((first, last) for last in range(first, min(len(tokens), first + 6)))
+        for first, last in ranges:
+            if first > last or first < 0 or last >= len(tokens):
+                continue
+            evidence = source[tokens[first].start():tokens[last].end()].strip(".,:;()")
+            try:
+                value = explicit_decimal(evidence, places=3)
+            except UserProblem:
+                continue
+            if value == expected:
+                point = tokens[first].start()
+                distance = abs(point - target_offset) if target_offset is not None else 0
+                candidates.append((distance, first, last, value))
+    if target_offset is not None:
+        candidates = [candidate for candidate in candidates if candidate[0] <= 140]
+    candidates.sort(key=lambda item: item[0])
+    if candidates and (len(candidates) == 1 or candidates[0][0] < candidates[1][0]):
+        return candidates[0][3]
+    raise UserProblem("Не удалось однозначно связать количество с пунктом. Укажите количество рядом с услугой.")
+
+
 def ground_line_target(source: str, span: SourceSpan, requested: int | None) -> None:
     """A model row number must agree with an explicit row reference in the text."""
     expected = explicit_line_target(source, words(source)[span.first_word - 1].start())
@@ -356,15 +424,43 @@ class LanguageIntent(StrictModel):
     draft_changes: tuple[DraftLineChange, ...] = Field(default=(), max_length=20,
         description="Atomic batch of current-preview line edits: update/delete/add/replace. Empty for new invoice requests.")
 
-    def to_intent(self, source: str) -> InvoiceIntent:
+    def to_intent(self, source: str, *, existing_draft: bool = False) -> InvoiceIntent:
         value = LanguageIntent.model_validate(self)
+        explicit_new_scope = bool(re.search(r"\b(?:нов\w*|друг\w*|отдельн\w*)\s+(?:сч[её]т|инвойс)\b|"
+            r"\b(?:another|new|separate)\s+(?:invoice|bill)\b", source, re.I))
+        edit_language = bool(re.search(r"\b(?:измен\w*|исправ\w*|помен\w*|замен\w*|удал\w*|убер\w*|"
+            r"остав\w*|сделай|постав\w*|количеств\w*|штук\w*|шт\.?|pcs|pieces)\b", source, re.I))
+        # Models occasionally classify a quantity/price correction as a list of
+        # initial invoice lines. With a live draft and clear edit language, preserve
+        # the source-grounded fields and reinterpret each mentioned existing item as
+        # a patch. The local editor still has to resolve its target against this preview.
+        if (value.initial_lines and existing_draft and edit_language and not explicit_new_scope
+                and not value.line_changes and not value.preview_changes):
+            converted = list(value.draft_changes)
+            for line in value.initial_lines:
+                start = words(source)[line.service_span.first_word - 1].start()
+                target = explicit_line_reference_span(source, start, line.service_span.last_word) or line.service_span
+                around = source[max(0, start - 80):min(len(source), words(source)[line.service_span.last_word - 1].end() + 100)]
+                deleting = bool(re.search(r"\b(?:удал\w*|убер\w*|выкин\w*|исключ\w*)\b", around, re.I))
+                if deleting and line.quantity is None and line.price_span is None and line.tax is None:
+                    converted.append(DraftLineChange(kind="delete", target_span=target, service_span=None,
+                        quantity=None, price_span=None, tax=None, description_span=None))
+                    continue
+                if not any((line.quantity, line.price_span, line.tax)):
+                    continue
+                converted.append(DraftLineChange(kind="update", target_span=target, service_span=None,
+                    quantity=line.quantity, price_span=line.price_span, tax=line.tax, description_span=None))
+            if converted != list(value.draft_changes):
+                value = LanguageIntent.model_validate({**value.model_dump(), "action": "edit",
+                    "initial_lines": (), "draft_changes": tuple(converted), "line_changes": (),
+                    "preview_changes": ()})
         day, period, tax, previous = value.date_change, value.period_change, value.tax_change, value.previous_hint_request
         quantity_changes = [s for s in value.line_changes if isinstance(s, QuantityLineChange)]
         named = [s for s in value.line_changes if isinstance(s, NamedLineChange)]
         preview_changes = list(value.preview_changes)
         if value.initial_lines and (value.action not in ("create", "clarify") or value.line_changes
                                     or preview_changes or value.draft_changes):
-            raise UserProblem("Укажите новый счёт отдельно от правок существующего preview.")
+            raise UserProblem("В сообщении смешаны новый счёт и правки текущего preview. Уточните, что именно нужно изменить.")
         descriptions = [c for c in preview_changes if isinstance(c, PreviewDescriptionChange)]
         explicit_rename = re.search(r"\b(?:назови\w*|переимен\w*)\s+(?:(?:перв\w*|втор\w*|трет\w*|\d+)\s+)?"
             r"(?:услуг\w*|строк\w*)\b|\b(?:название|описание)\s+(?:услуг\w*|строк\w*)\b", source, re.I)
@@ -576,8 +672,8 @@ class LanguageIntent(StrictModel):
                     description = description.strip().strip('«»"').strip()
                 quantity = None
                 if change.quantity is not None:
-                    quantity_text = change.quantity.source_span.text(source)
-                    quantity = explicit_decimal(quantity_text, places=3)
+                    quantity = grounded_quantity(source, change.quantity.source_span,
+                        change.quantity.value, change.target_span)
                     if quantity != change.quantity.value:
                         raise UserProblem("Количество не совпало с вашим сообщением. Укажите его ещё раз.")
                 price = None
@@ -616,8 +712,8 @@ class LanguageIntent(StrictModel):
                     tax=tax_request, description=description))
         if batch_legacy_quantities:
             for change in quantity_changes:
-                quantity_text = change.quantity.source_span.text(source)
-                quantity = explicit_decimal(quantity_text, places=3)
+                quantity = grounded_quantity(source, change.quantity.source_span,
+                    change.quantity.value)
                 if quantity != change.quantity.value:
                     raise UserProblem("Количество не совпало с вашим сообщением. Укажите его ещё раз.")
                 first_word = words(source)[change.quantity.source_span.first_word - 1]
@@ -671,8 +767,11 @@ operation, preserving message order. target_span must copy the user's reference 
 CURRENT displayed row: number/item, ordinal, or service name. If both number and name
 are mentioned, include both in target_span. Never infer a target from hidden context.
 For update include only explicit quantity/price/tax/description spans. For delete identify
-exactly the row. For add provide only the new service span; for replace include both old
-row target_span and new service_span. Quantity is optional unless spoken. Price is a NET
+exactly the row. For a request like “оставь пункт 1 и Payroll, остальное удали”, emit one
+retain operation per explicitly named item; retain means keep those items and remove every
+other current item. Do not use delete operations to approximate a keep-only request. For add
+provide only the new service span; for replace include both old row target_span and new
+service_span. Quantity is optional unless spoken. Price is a NET
 unit price, never an invoice total. Tax uses the explicit source/rate/profile span rules
 below. Never output IDs, numeric money/rates, totals or values copied from preview. Do not
 duplicate an action in draft_changes and legacy line_changes/preview_changes. If one target

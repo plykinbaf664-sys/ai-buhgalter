@@ -1,4 +1,5 @@
 """Untrusted language intent and deterministic edits of a bounded invoice draft."""
+from difflib import SequenceMatcher
 import re
 from datetime import date
 from typing import Annotated, Literal
@@ -85,7 +86,7 @@ class IntentPreviewChange(StrictModel):
 
 
 class IntentDraftMutation(StrictModel):
-    kind: Literal["update", "delete", "add", "replace"]
+    kind: Literal["update", "delete", "add", "replace", "retain"]
     target: Label | None = None
     service: Label | None = None
     quantity: IntentQuantity | None = None
@@ -96,7 +97,7 @@ class IntentDraftMutation(StrictModel):
 
     @model_validator(mode="after")
     def valid_operation(self):
-        if self.kind == "delete":
+        if self.kind in ("delete", "retain"):
             valid = self.target is not None and self.service is None and all(
                 value is None for value in (self.quantity, self.price, self.currency, self.tax, self.description))
         elif self.kind == "add":
@@ -391,14 +392,47 @@ def _resolve_draft_target(target: str, prepared: PreparedInvoice, line_ids: tupl
         if number_id is None:
             raise UserProblem("Укажите номер или название строки, которую нужно изменить.")
         return number_id
-    candidates = set()
+    stop = {"услуга", "услуги", "service", "services", "строка", "строки", "пункт", "позиция",
+            "изменить", "измени", "исправь", "поставь", "сделай", "оставь", "удали", "удалить",
+            "пожалуйста", "количество", "штук", "штуки", "шт", "цена", "цену", "ндс", "налог"}
+
+    def tokens(value: str) -> list[str]:
+        value = value.casefold().replace("ё", "е")
+        value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+        return [token for token in value.split() if token not in stop and not token.isdecimal()]
+
+    def score(left: str, right: str) -> float:
+        wanted, actual = tokens(left), tokens(right)
+        if not wanted or not actual:
+            return 0.0
+        similarities = [max(SequenceMatcher(None, word, candidate).ratio()
+                            for candidate in actual) for word in wanted]
+        return sum(similarities) / len(similarities)
+
+    ranked: list[tuple[float, str]] = []
+    exact_matches: set[str] = set()
     for index, line in enumerate(prepared.preview.lines):
         labels = [line.description]
         if index < len(command.services):
             labels.append(command.services[index].query)
-        normalized = {re.sub(r"[^\w]+", " ", label.casefold().replace("ё", "е")).strip() for label in labels}
-        if name in normalized or any(len(name) >= 4 and (name in label or label in name) for label in normalized):
-            candidates.add(line_ids[index])
+        normalized_labels = {re.sub(r"[^\w]+", " ", label.casefold().replace("ё", "е")).strip()
+                             for label in labels}
+        if any(name == label or len(name) >= 4 and (name in label or label in name)
+               for label in normalized_labels):
+            exact_matches.add(line_ids[index])
+            continue
+        best = max((score(name, label) for label in labels), default=0.0)
+        # Approximate matching only proposes an identity when the best candidate is
+        # clear. Similar rows remain ambiguous and must be selected explicitly.
+        if best >= 0.62:
+            ranked.append((best, line_ids[index]))
+    if exact_matches:
+        candidates = exact_matches
+        ranked = []
+    else:
+        ranked.sort(reverse=True)
+        candidates = {line_id for value, line_id in ranked
+                      if value >= 0.62 and (not ranked or ranked[0][0] - value < 0.10)}
     if number_id is not None:
         if candidates and number_id not in candidates:
             raise UserProblem("Номер строки и название указывают на разные позиции. Уточните цель правки.")
@@ -427,6 +461,7 @@ def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
               for index, line_id in enumerate(line_ids)}
     order = list(line_ids)
     deletes: set[str] = set()
+    retained: set[str] | None = None
     issues = []
     changed_fields: dict[tuple[str, str], object] = {}
 
@@ -447,6 +482,11 @@ def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
         state = states[line_id]
         if mutation.kind == "delete":
             deletes.add(line_id)
+            continue
+        if mutation.kind == "retain":
+            if retained is None:
+                retained = set()
+            retained.add(line_id)
             continue
         if mutation.kind == "replace":
             if any((mutation.price, mutation.tax, mutation.description, mutation.currency)):
@@ -477,7 +517,15 @@ def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
             else:
                 state["override"][key] = value
 
-    order = [line_id for line_id in order if line_id not in deletes]
+    if retained is not None:
+        # A keep-only request is mass deletion if misresolved, so unlike ordinary
+        # edits its unresolved target must fail the whole batch below.
+        if issues:
+            raise UserProblem("Не удалось однозначно определить все пункты, которые нужно оставить. Preview не изменён.")
+        order = [line_id for line_id in order
+                 if (line_id in retained or states[line_id]["new"]) and line_id not in deletes]
+    else:
+        order = [line_id for line_id in order if line_id not in deletes]
     if deletes.intersection(line_id for line_id, _ in changed_fields):
         raise UserProblem("Одну строку одновременно удаляют и редактируют. Уточните список правок.")
     if not order:
