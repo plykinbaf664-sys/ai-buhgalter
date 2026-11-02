@@ -320,7 +320,8 @@ def explicit_line_target(source: str, start: int) -> int | None:
         "одиннадцат", "двенадцат", "тринадцат", "четырнадцат", "пятнадцат", "шестнадцат",
         "семнадцат", "восемнадцат", "девятнадцат", "двадцат")
     number = r"\d+(?:-[а-я]+)?|(?:" + "|".join(ordinal_stems) + r")[а-яё]*"
-    pattern = r"\b(?:(?P<before>" + number + r")\s+строк[а-яё]*|строк[а-яё]*\s*(?:номер\s*|№\s*)?(?P<after>\d+))\b"
+    item = r"(?:строк[а-яё]*|пункт[а-яё]*|позици[а-яё]*|элемент[а-яё]*|item|line)"
+    pattern = r"\b(?:(?P<before>" + number + r")\s+" + item + r"|" + item + r"\s*(?:номер\s*|№\s*)?(?P<after>\d+))\b"
     anchors = []
     for match in re.finditer(pattern, source, re.I):
         token = match["before"] or match["after"]
@@ -345,11 +346,12 @@ class LanguageIntent(StrictModel):
     date_change: DateChange | None
     period_change: PeriodChange | None
     line_changes: tuple[NamedLineChange | QuantityLineChange, ...] = Field(max_length=20,
-        description="ONLY changed lines. For quantity-only edits use kind=quantity (no service-name field). Never copy unchanged Draft rows. Empty for date/tax edits.")
+        description="Legacy edits to an unfinished invoice draft only. For an existing preview use draft_changes exclusively. Never copy unchanged Draft rows.")
     tax_change: TaxChange | None
     previous_hint_request: PreviousChange | None
     clarification: Literal["client", "date", "service", "tax", "unsupported"] | None
-    preview_changes: tuple[PreviewPriceChange | PreviewDescriptionChange | PreviewTaxChange, ...] = Field(default=(), max_length=20)
+    preview_changes: tuple[PreviewPriceChange | PreviewDescriptionChange | PreviewTaxChange, ...] = Field(default=(), max_length=20,
+        description="Legacy single-field preview edit only. For a multi-action preview edit use draft_changes for the entire message.")
     initial_lines: tuple[InitialLineChange, ...] = Field(default=(), max_length=20)
     draft_changes: tuple[DraftLineChange, ...] = Field(default=(), max_length=20,
         description="Atomic batch of current-preview line edits: update/delete/add/replace. Empty for new invoice requests.")
@@ -387,9 +389,13 @@ class LanguageIntent(StrictModel):
             if duplicates and re.search(r"\b(?:добав\w*|нов\w*\s+услуг\w*)\b", source, re.I):
                 raise UserProblem("Уточните отдельно добавление услуги и переименование существующей строки.")
             named = [s for s in named if s not in duplicates]
-        if quantity_changes and (len(quantity_changes) != 1 or named):
+        if quantity_changes and (len(quantity_changes) != 1 or named) and not value.draft_changes:
             raise UserProblem("Уточните количество и одну изменяемую строку.")
-        quantity_change = quantity_changes[0] if quantity_changes else None
+        if value.draft_changes and named:
+            raise UserProblem("Уточните правки строк одним согласованным перечнем.")
+        batch_legacy_quantities = bool(value.draft_changes) and bool(quantity_changes) or (
+            len(quantity_changes) > 1 and not named and not preview_changes and not value.initial_lines)
+        quantity_change = quantity_changes[0] if quantity_changes and not batch_legacy_quantities else None
         if named and (len({s.kind for s in named}) != 1 or
                       named[0].kind == "replace" and len(named) > 1 and any(s.line_number for s in named)):
             raise UserProblem("Уточните одну правку строки или новый список услуг.")
@@ -559,7 +565,7 @@ class LanguageIntent(StrictModel):
                     currency=next(iter(currencies)).upper() if currencies and (amount_evidence or price_evidence) else None))
         draft_mutations = []
         if value.draft_changes:
-            if value.initial_lines or value.line_changes or value.preview_changes:
+            if value.initial_lines or value.preview_changes:
                 raise UserProblem("Уточните правки строк одним согласованным перечнем.")
             for change in value.draft_changes:
                 target = change.target_span.text(source) if change.target_span else None
@@ -608,6 +614,18 @@ class LanguageIntent(StrictModel):
                 draft_mutations.append(IntentDraftMutation(kind=change.kind, target=target, service=service,
                     quantity=quantity, price=price, currency=next(iter(currencies), None) if price is not None else None,
                     tax=tax_request, description=description))
+        if batch_legacy_quantities:
+            for change in quantity_changes:
+                quantity_text = change.quantity.source_span.text(source)
+                quantity = explicit_decimal(quantity_text, places=3)
+                if quantity != change.quantity.value:
+                    raise UserProblem("Количество не совпало с вашим сообщением. Укажите его ещё раз.")
+                first_word = words(source)[change.quantity.source_span.first_word - 1]
+                target_number = explicit_line_target(source, first_word.start())
+                if target_number is None or change.line_number is not None and target_number != change.line_number:
+                    raise UserProblem("Не удалось подтвердить пункт для изменения количества. Укажите его номер рядом с количеством.")
+                draft_mutations.append(IntentDraftMutation(kind="update", target=f"пункт {target_number}",
+                    quantity=quantity))
         action = "edit" if draft_mutations else "create" if initial_services or recovered and value.clarification == "client" else value.action
         return InvoiceIntent(action=action,
             client=client,
@@ -659,8 +677,12 @@ unit price, never an invoice total. Tax uses the explicit source/rate/profile sp
 below. Never output IDs, numeric money/rates, totals or values copied from preview. Do not
 duplicate an action in draft_changes and legacy line_changes/preview_changes. If one target
 is ambiguous, retain the other clear operations and let the application request clarification.
-For NEW requests without financial overrides, ordinary line_changes remain valid.
-Use preview_changes ONLY for explicit revisions of an existing preview:
+For an unfinished invoice that has no preview yet, ordinary line_changes may fill or
+replace the draft. Once a preview exists, always use draft_changes for every line edit;
+never express preview edits through line_changes or preview_changes.
+For backward compatibility, preview_changes can represent one explicit field edit only
+when there are no other line actions. It is not the output format for a multi-action
+message; put every operation into draft_changes instead. Legacy fields:
 kind=price with amount_span pointing ONLY at the price number words/digits (no currency),
 kind=amount with amount_span for a NET LINE subtotal (not the whole invoice total),
 kind=description with description_span pointing at the requested display wording,
@@ -670,8 +692,8 @@ Use line_number if explicitly targeted; null otherwise. Never output numeric pri
 rates, IDs or totals: the application decodes the quoted spans and verifies tax in 1C.
 Renaming display text preserves the service ID; use description for rename/title requests,
 not catalog replacement. For "назови услугу ...", "переименуй ...", "название ...":
-line_changes MUST be [], and the requested wording belongs ONLY in preview_changes kind=description.
-Never duplicate the same edit in line_changes and preview_changes. A month inside a
+never model a rename as a new service; use draft_changes kind=update for existing preview.
+Never duplicate the same edit in line_changes, preview_changes and draft_changes. A month inside a
 requested service title belongs to that title, not a separate period_change.
 Price means NET UNIT PRICE, not document total or tax-inclusive price.
 Existing tax_change may still express global with_tax/without_tax, never invent a rate.
@@ -692,16 +714,12 @@ date_change is the document date; period_change is separate and only for a servi
 Extract explicit date components only: unknown day/month/year null. Ordinal words are
 valid (e.g. an ordinal meaning 5 maps to day 5). The application supplies known context
 or current date components and shows them for confirmation. Do not copy Draft dates.
-line_changes contains ONLY changed lines. For an
-addition use add with ONLY the added service, not existing rows. For a replacement use
-replace; specific target line_number if clear. If several lines and target is unclear,
-clarify. For date/tax-only changes line_changes=[].
-Each line_changes entry uses kind=add/replace with new_service_name word indexes,
-or kind=quantity with NO service-name field. Quantities are null unless explicitly
-mentioned; use quantity={source_span: word indexes, value: numeric meaning}.
-For quantity-only changes use ONE entry with kind=quantity,
-quantity={source_span: quantity word indexes, value: number}, plus line_number
-if needed. There is NO new service name in a quantity-only request. Never choose a target at random.
+For an unfinished invoice draft only, line_changes contains explicitly changed draft
+services. For an existing preview, draft_changes is the single source of all requested
+line operations, including quantity, price, tax, description, deletion, addition and
+replacement. Multiple operations stay in one draft_changes list; never split an existing
+preview edit between legacy fields. Each target is grounded in the current displayed
+preview and each changed value must have its own source span. Never choose a target at random.
 If Draft.unresolved_line is set, service clarification replaces that line.
 with_tax is an explicit request for VAT, without_tax for no VAT, default for confirmed
 usual treatment. Never choose a rate. Named tax profile uses profile plus profile_span.
@@ -709,14 +727,9 @@ previous_hint_request last/previous_month/usual asks the adapter for previous co
 never copy prices or rows from Draft to pretend to have read the previous document.
 Leave all unchanged *_change fields null. A new preview always requires human confirmation.
 
-Example of a PATCH (the wording is an example, understand equivalent requests):
-Final message: Во второй строке поставь количество два
-Numbered words: 1:Во 2:второй 3:строке 4:поставь 5:количество 6:два
-Output: {"action":"edit","client_change":null,"date_change":null,"period_change":null,
-"line_changes":[{"kind":"quantity","line_number":2,"quantity":{"source_span":{"first_word":6,"last_word":6},"value":2}}],
-"tax_change":null,"previous_hint_request":null,"clarification":null}
-Another equivalent message: Change the count in row two to three
-Words: 1:Change 2:the 3:count 4:in 5:row 6:two 7:to 8:three
-The quantity value is 3, quantity source_span is 8..8, line_number is 2, all other
-change fields are null. The known Draft client is NEVER returned as a new client.
-There is no new service name in either quantity example."""
+Always understand ordinals and references to “пункт”, “строка”, “позиция” and
+service names. A preview example like “Удали второй пункт и третий пункт, а в пятом
+пункте поменяй количество на 5” is one existing-preview patch with three operations:
+delete target “второй пункт”; delete target “третий пункт”; update target “в пятом
+пункте” with quantity source span pointing only to the final 5. All three belong in
+draft_changes, in the order stated. Do not merge or renumber targets before application."""

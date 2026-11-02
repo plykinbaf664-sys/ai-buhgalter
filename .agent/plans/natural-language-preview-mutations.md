@@ -14,3 +14,20 @@ After an invoice preview, ordinary requests to update and remove several lines f
 ## Acceptance
 
 The request «Строка 2 исправить на 4 штуки. Строка 3, строка 4 удалить.» updates the intended row and removes the other two in one mutation. Remaining lines and accounting context are preserved; totals recalculate; only the new preview can be confirmed. Rejected or ambiguous edits preserve the current preview and confirmation. Editing itself performs no write.
+
+## Production follow-up: multiple item edits
+
+### Observed failure
+
+A live edit combining deletion of two numbered items with a quantity change to another item received `Уточните количество и одну изменяемую строку.` That exact response is raised by `LanguageIntent.to_intent()` when multiple legacy quantity changes are returned. The prompt also contains older, conflicting instructions to use the legacy shape, despite the newer batch `draft_changes` contract.
+
+### Checks and implementation
+
+1. Make the prompt consistent: edits to an existing preview use `draft_changes`; retain safe compatibility for explicit legacy quantity spans mixed with a valid batch.
+2. Ground item numbers locally, including “пункт” references, and apply operations against current stable line identities before renumbering.
+3. Label preview positions as “Пункт N”.
+4. Preserve separate source rows when service descriptions match; never merge accounting lines implicitly.
+
+### Verification criteria
+
+For “Удали второй пункт и третий пункт, а в пятом пункте поменяй количество на 5”, remove exactly original items 2 and 3, update original item 5, preserve other line identities, recalculate net/VAT/gross totals, and return a fresh preview with current item numbers. The old confirmation is stale; no financial write occurs. Repeated service descriptions remain separate positions.

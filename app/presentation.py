@@ -31,11 +31,11 @@ def preview_text(preview: InvoicePreview) -> str:
     elif preview.previous_reference:
         parts.append(f"Подсказка из предыдущего счёта: {preview.previous_reference}. Цены проверены заново в 1С.")
     for i, line in enumerate(preview.lines, 1):
-        parts.extend(("", f"{i}. Услуга: {line.description}", f"Количество: {quantity(line.quantity)} {line.uom}",
+        parts.extend(("", f"Пункт {i}. Услуга: {line.description}", f"Количество: {quantity(line.quantity)} {line.uom}",
             f"Цена {'с НДС' if line.price_includes_tax else 'без НДС'}: {money(line.price)} {preview.currency}",
             f"Сумма без НДС: {money(line.subtotal)} {preview.currency}",
             f"Налог: {line.tax.label}; ставка {quantity(line.tax.rate)}%",
-            f"НДС: {money(line.tax_amount)} {preview.currency}", f"Сумма строки: {money(line.total)} {preview.currency}"))
+            f"НДС: {money(line.tax_amount)} {preview.currency}", f"Сумма пункта: {money(line.total)} {preview.currency}"))
     parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
                   f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
                   f"Итого: {money(preview.total)} {preview.currency}",
@@ -63,13 +63,13 @@ def historical_preview_text(preview: InvoicePreview) -> str:
         parts.append("В правке «Цена» указывайте цену без НДС; цену с НДС пересчитаем и покажем в preview.")
     source_map = {item.source_id: item for item in source.sources}
     for i, line in enumerate(preview.lines, 1):
-        parts.extend(("", f"{i}. {line.description}",
+        parts.extend(("", f"Пункт {i}. {line.description}",
             f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}" + (" (с НДС)" if line.price_includes_tax else ""),
             f"Без НДС: {money(line.subtotal)}; НДС {quantity(line.tax.rate)}% ({line.tax.label}): {money(line.tax_amount)}",
-            f"Сумма строки: {money(line.total)} {preview.currency}"))
+            f"Сумма пункта: {money(line.total)} {preview.currency}"))
         if len(source_map) > 1 and line.source_id in source_map:
             origin = source_map[line.source_id]
-            parts.append(f"Образец строки: №{origin.source_number} от {origin.source_date:%d.%m.%Y}")
+            parts.append(f"Образец пункта: №{origin.source_number} от {origin.source_date:%d.%m.%Y}")
     parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
                   f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
                   f"Итого: {money(preview.total)} {preview.currency}", "",
@@ -98,7 +98,7 @@ def historical_preview_text(preview: InvoicePreview) -> str:
                 elif item.reference_id == '"No"':
                     parts.append('Автоматический зачёт авансов и задолженности: отключён, как в образце.')
             if role in roles:
-                prefix = f'Строка {pieces[1]}, ' if len(pieces) == 3 else ''
+                prefix = f'Пункт {pieces[1]}, ' if len(pieces) == 3 else ''
                 parts.append(f'{prefix}{roles[role]}: {item.label}')
         parts.append('Проверьте перенесённые учётные реквизиты перед подтверждением.')
     else:
@@ -112,7 +112,7 @@ def manual_changes_text(preview: InvoicePreview) -> str:
     for edit in preview.user_overrides:
         fields = [label for field, label in (("price", "цена без НДС"), ("amount", "сумма без НДС"), ("tax", "налог"), ("description", "название"))
                   if getattr(edit, field) is not None]
-        changes.append(f"строка {edit.line_number}: {', '.join(fields)}")
+        changes.append(f"пункт {edit.line_number}: {', '.join(fields)}")
     return "Изменено пользователем — " + "; ".join(changes) + (
         '. Изменения включены в подтверждаемый план черновика.' if preview.execution_review is not None else
         ". Только preview; это не изменение данных 1С.")

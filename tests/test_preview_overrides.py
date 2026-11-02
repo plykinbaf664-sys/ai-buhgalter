@@ -127,6 +127,13 @@ def source_quantity(text, fragment, value):
     return {"source_span": span(text, fragment), "value": value}
 
 
+def test_existing_preview_prompt_uses_one_batch_contract():
+    from app.language import LANGUAGE_PROMPT
+    assert "For an EXISTING preview, put every requested line change in draft_changes" in LANGUAGE_PROMPT
+    assert "For quantity-only changes use ONE entry with kind=quantity" not in LANGUAGE_PROMPT
+    assert "All three belong in\ndraft_changes" in LANGUAGE_PROMPT
+
+
 def draft_change(text, kind, *, target=None, service=None, quantity=None,
                  price_span=None, tax=None, description=None):
     return {"kind": kind,
@@ -224,6 +231,56 @@ def test_real_reported_multi_line_edit_returns_new_preview_and_invalidates_only_
     press(flow, current_button)
     assert "документ не создавался" in flow["sent"][-1]["text"]
     assert {request.method for request in flow["fixture"].calls} == {"GET"}
+
+
+@pytest.mark.parametrize("flow", [5], indirect=True)
+@pytest.mark.parametrize("legacy_quantity", [False, True])
+def test_live_wording_applies_multi_item_batch_and_legacy_quantity(flow, legacy_quantity):
+    original = prepared(flow)
+    old_button = button(flow)
+    text = "Удали второй пункт и третий пункт, а в пятом пункте поменяй количество на 5"
+    operations = [
+        draft_change(text, "delete", target="второй пункт"),
+        draft_change(text, "delete", target="третий пункт")]
+    if legacy_quantity:
+        line_changes = [{"kind": "quantity", "line_number": 5, "quantity": source_quantity(text, "5", 5)}]
+    else:
+        line_changes = []
+        operations.append(draft_change(text, "update", target="в пятом пункте", quantity=("5", 5)))
+    flow["outputs"].append({"action": "edit", "client_change": None, "date_change": None,
+        "period_change": None, "line_changes": line_changes, "tax_change": None,
+        "previous_hint_request": None, "clarification": None, "preview_changes": [],
+        "initial_lines": [], "draft_changes": operations})
+    send(flow, text)
+    edited = prepared(flow)
+    context = flow["client"].app.state.bot.contexts[123]
+    assert [line.source_line_number for line in edited.preview.lines] == [1, 4, 5]
+    assert [line.quantity for line in edited.preview.lines] == [1, 1, 5]
+    assert len(set(context.line_ids)) == 3
+    assert edited.preview.subtotal == 7000
+    assert edited.preview.tax_amount == 350
+    assert edited.preview.total == 7350
+    assert edited.request.client_id == original.request.client_id
+    assert edited.preview.historical_proposal.contract_id == original.preview.historical_proposal.contract_id
+    assert edited.operation_id == original.operation_id
+    assert edited.preview.digest != original.preview.digest
+    assert "Пункт 1." in flow["sent"][-1]["text"]
+    assert "Строка 1" not in flow["sent"][-1]["text"]
+    assert button(flow) != old_button
+    press(flow, old_button)
+    assert "последнем сообщении" in flow["sent"][-1]["text"]
+    assert {request.method for request in flow["fixture"].calls} == {"GET"}
+
+
+@pytest.mark.parametrize("text,fragment,expected", [
+    ("Удали второй пункт, а в пятом пункте поменяй количество на 5", "5", 5),
+    ("Удалить пункт 4 и изменить количество в строке номер 2 на 3", "3", 2),
+    ("Delete item 7 and set quantity on item 5 to 2", "2", 5),
+])
+def test_legacy_quantity_target_grounding_accepts_item_wording(text, fragment, expected):
+    from app.language import explicit_line_target
+    quantity_word = next(word for word in words(text) if text[word.start():word.end()] == fragment)
+    assert explicit_line_target(text, quantity_word.start()) == expected
 
 
 def test_named_mixed_and_ordinal_targets_keep_current_line_identity(flow):

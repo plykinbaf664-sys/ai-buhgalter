@@ -349,7 +349,7 @@ class Bot:
         buttons = [[InlineButton(text=(f"{i}. {item.display_name[:45]}" + (f" · {item.code}" if item.code else ""))[:64],
             callback_data=f"service:{pending.token}:{i}")] for i, item in enumerate(exc.choices.candidates, 1)]
         buttons.append([InlineButton(text="Отмена", callback_data=f"service:{pending.token}:cancel")])
-        return ConfirmationPrompt(text=f"Выберите услугу для строки {exc.line_number}:\n" + "\n".join(
+        return ConfirmationPrompt(text=f"Выберите услугу для пункта {exc.line_number}:\n" + "\n".join(
             f"{i}. {item.display_name}" + (f" · код {item.code}" if item.code else f" · запись {item.service_id}")
             for i, item in enumerate(exc.choices.candidates, 1))
             + "\nСуммы и остальные параметры сохранены.", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
@@ -440,7 +440,7 @@ class Bot:
                 self.contexts.pop(uid, None)
                 return "Запрос отменён. Документ не создавался."
             if match[2] == "edit":
-                return f"Укажите количество для строки {pending.line_number}, например «Во второй строке количество 1». Остальные параметры сохранены."
+                return f"Укажите количество для пункта {pending.line_number}, например «В пункте 2 количество 1». Остальные параметры сохранены."
             services = list(pending.command.services)
             selection = services[pending.line_number - 1]
             services[pending.line_number - 1] = ServiceSelection(query=selection.query, quantity=Decimal('1'))
@@ -472,7 +472,7 @@ class Bot:
             return "Команда отменена. Документ не создавался."
         if action.action == "edit":
             self.pending.pop(uid)
-            return "Напишите или наговорите, что изменить: дату, цену без НДС, налог, название услуги или количество. Для нескольких строк укажите номер. Остальные параметры сохранены."
+            return "Напишите или наговорите, что изменить: дату, цену без НДС, налог, название услуги или количество. Для каждого пункта укажите его номер. Остальные параметры сохранены."
         return await self.confirm(uid, pending, request_id)
 
     async def prepare(self, message: Message | CallbackQuery,
@@ -536,7 +536,7 @@ class Bot:
                     "Сначала покажем полный preview. До подтверждения документы не создаются.\n"
                     "Правки можно писать или наговаривать коротко: остальные поля сохраняются.\n"
                     "После preview: «Цена 1500», «НДС 5%», «Без НДС», «Назови услугу Бухгалтерское обслуживание». "
-                    "Цена — за единицу без НДС в валюте preview. Для нескольких строк укажите номер.\n"
+                    "Цена — за единицу без НДС в валюте preview. Для каждого пункта укажите его номер.\n"
                     "Если год/месяц даты не указан, используем текущий или дату из контекста — проверьте preview.\n"
                     + ("Сейчас TEST / MOCK: вымышленные данные и тестовый PDF, реальные счета не создаются."
                        if self.service.onec.is_fake is True else
@@ -631,7 +631,7 @@ class Bot:
                 if (context is None or context.prepared is None or context.command is None
                         or intent.client is not None or intent.services or intent.invoice_date is not None
                         or intent.service_period is not None or intent.initial_overrides or intent.preview_changes):
-                    raise UserProblem("Для изменения строк нужен текущий preview. Сначала сформируйте счёт, затем правьте его строки.")
+                    raise UserProblem("Для изменения пунктов нужен текущий preview. Сначала сформируйте счёт, затем укажите пункты для правки.")
                 command, line_ids, origins, selected_ids, issues = apply_draft_mutations(
                     context.prepared, context.command, context.line_ids,
                     context.line_origins, intent.draft_mutations)
@@ -771,7 +771,7 @@ class Bot:
             pending = PendingInitialQuantity(token=secrets.token_hex(16), command=command,
                 line_number=exc.line_number, expires_at=time.monotonic() + 300)
             self.initial_quantities[uid] = pending
-            return ConfirmationPrompt(text=(f"Строка {exc.line_number}: указана сумма без НДС {exc.amount}. "
+            return ConfirmationPrompt(text=(f"Пункт {exc.line_number}: указана сумма без НДС {exc.amount}. "
                 f"В образце количество {exc.quantity} {exc.uom}; с ним цена до копейки не даёт точную сумму. "
                 "Использовать количество 1? Сумма и налоговый запрос сохранятся."),
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[

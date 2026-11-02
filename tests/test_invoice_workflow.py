@@ -455,7 +455,7 @@ def test_large_preview_delivers_every_line_and_buttons_only_after_all_values(wor
     assert all(len(m["text"]) <= 4000 for m in messages)
     assert all("reply_markup" not in m for m in messages[:-1])
     text = "\n".join(m["text"] for m in messages)
-    assert all(f"{i}. Услуга:" in text for i in range(1, 21))
+    assert all(f"Пункт {i}. Услуга:" in text for i in range(1, 21))
     assert "21 000.00 AED" in text and "reply_markup" in messages[-1]
     assert not backend.documents
 
