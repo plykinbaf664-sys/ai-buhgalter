@@ -30,3 +30,4 @@ Reuse the current typed intent, bot, and preview pipeline. Do not change FirstBi
 - Local target resolution prefers exact labels, then bounded approximate matching; ties remain clarification.
 - Quantity grounding can recover the one explicit quantity next to a unit marker when a model span also captured adjacent money, and still verifies against the model's typed quantity.
 - Verification: focused Telegram preview-edit suite and full repository suite; production business writes are not part of verification.
+- Follow-up from live dialog reproduction: quantity-unit matching strips punctuation and deduplicates the same literal found through both a unit and a “quantity” label. Regressions cover two item quantities separated by commas and a service-name quantity followed by deletions.

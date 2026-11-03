@@ -372,13 +372,16 @@ def grounded_quantity(source: str, span: SourceSpan, expected: Decimal,
     quantity_labels = re.compile(r"^(?:количеств\w*|quantity|qty)$", re.I)
     candidates: list[tuple[int, int, int, Decimal]] = []
     for index, token in enumerate(tokens):
-        token_text = source[token.start():token.end()].casefold().replace("ё", "е")
+        # `words()` intentionally keeps punctuation attached to a token. Strip
+        # separators here so the common spoken form “5 штук, а пункт 1 ...”
+        # still exposes its quantity unit to the local grounding check.
+        token_text = source[token.start():token.end()].casefold().replace("ё", "е").strip(".,;:!?()[]{}\"'«»")
         ranges = []
         if quantity_units.fullmatch(token_text):
             ranges.extend((first, index - 1) for first in range(max(0, index - 6), index))
         if quantity_labels.fullmatch(token_text):
             first = index + 1
-            if first < len(tokens) and source[tokens[first].start():tokens[first].end()].casefold() in ("на", "до", "=", ":"):
+            if first < len(tokens) and source[tokens[first].start():tokens[first].end()].casefold().strip(".,;:!?()") in ("на", "до", "=", ":"):
                 first += 1
             ranges.extend((first, last) for last in range(first, min(len(tokens), first + 6)))
         for first, last in ranges:
@@ -393,6 +396,13 @@ def grounded_quantity(source: str, span: SourceSpan, expected: Decimal,
                 point = tokens[first].start()
                 distance = abs(point - target_offset) if target_offset is not None else 0
                 candidates.append((distance, first, last, value))
+    # A phrase such as “quantity 4 pcs” is found by both the quantity label and
+    # unit marker. Treat that as one literal value, not an ambiguity.
+    unique_candidates = {}
+    for candidate in candidates:
+        key = (tokens[candidate[1]].start(), candidate[3])
+        unique_candidates[key] = candidate
+    candidates = list(unique_candidates.values())
     if target_offset is not None:
         candidates = [candidate for candidate in candidates if candidate[0] <= 140]
     candidates.sort(key=lambda item: item[0])

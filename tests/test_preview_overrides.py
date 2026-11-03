@@ -365,6 +365,44 @@ def test_batch_edit_delete_and_service_quantity_preserve_original_targets(flow):
     assert updated.preview.total == updated.preview.subtotal + updated.preview.tax_amount
 
 
+@pytest.mark.parametrize("flow", [4], indirect=True)
+def test_natural_mixed_delete_and_two_quantities_survive_commas(flow):
+    text = ("Смотри, нужно удалить пункт 2, пункт 3 поменять на 5 штук, "
+            "а в пункте 1 поменять на 3 штуки, цены оставить прежними")
+    original = prepared(flow)
+    send_draft_changes(flow, text, [
+        draft_change(text, "delete", target="пункт 2"),
+        draft_change(text, "update", target="пункт 3",
+            quantity=("5 штук, а в пункте 1 поменять на 3 штуки", 5)),
+        draft_change(text, "update", target="пункте 1",
+            quantity=("3 штуки, цены оставить прежними", 3)),
+    ])
+    updated = prepared(flow)
+    assert [line.source_line_number for line in updated.preview.lines] == [1, 3, 4]
+    assert [line.quantity for line in updated.preview.lines] == [3, 5, 1]
+    assert updated.request.client_id == original.request.client_id
+    assert updated.preview.historical_proposal.contract_id == original.preview.historical_proposal.contract_id
+    assert updated.preview.total == updated.preview.subtotal + updated.preview.tax_amount
+
+
+@pytest.mark.parametrize("flow", [3], indirect=True)
+def test_natural_service_name_quantity_and_following_deletions(flow):
+    original = prepared(flow)
+    service_name = original.preview.lines[0].description
+    text = (f"Смотри, услуга {service_name} поменяй на 3 штуки, "
+            "пункт 2 удали, пункт 3 удали")
+    send_draft_changes(flow, text, [
+        draft_change(text, "update", target=service_name,
+            quantity=("3 штуки, пункт 2 удали, пункт 3 удали", 3)),
+        draft_change(text, "delete", target="пункт 2"),
+        draft_change(text, "delete", target="пункт 3"),
+    ])
+    updated = prepared(flow)
+    assert [line.source_line_number for line in updated.preview.lines] == [1]
+    assert updated.preview.lines[0].service_id == original.preview.lines[0].service_id
+    assert updated.preview.lines[0].quantity == 3
+
+
 @pytest.mark.parametrize("text,fragment,expected", [
     ("Удали второй пункт, а в пятом пункте поменяй количество на 5", "5", 5),
     ("Удалить пункт 4 и изменить количество в строке номер 2 на 3", "3", 2),
