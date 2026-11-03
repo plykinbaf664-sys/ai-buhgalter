@@ -1,5 +1,6 @@
 import asyncio
 import hmac
+import inspect
 from decimal import Decimal
 import re
 import secrets
@@ -597,7 +598,14 @@ class Bot:
                 return await self.search_company(uid, InvoiceDraft.model_validate({**base.model_dump(), "client": query}), request_id)
         language_context = context or self.last_contexts.get(uid)
         try:
-            interpretation = await self.interpreter.interpret(text, language_context.draft if language_context else None)
+            draft = language_context.draft if language_context else None
+            if (isinstance(self.interpreter, CommandInterpreter) and context is not None
+                    and context.prepared is not None
+                    and "preview_ready" in inspect.signature(self.interpreter.interpret).parameters):
+                interpretation = await self.interpreter.interpret(text, draft,
+                    preview_ready=True)
+            else:
+                interpretation = await self.interpreter.interpret(text, draft)
         except ExternalFailure as exc:
             if is_voice and exc.code in ("openai_timeout", "openai_api_error"):
                 event(request_id=request_id, user_id=uid, stage="interpret", status="error", error=exc.code)

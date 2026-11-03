@@ -170,11 +170,17 @@ class InvoiceService:
                         if origin.service_id != selections[edit.line_number - 1].service_id:
                             raise UserProblem("Строка правки изменилась. Подготовьте preview заново.")
                     else:
-                        if edit.line_number > len(existing.preview.lines):
-                            raise UserProblem("В preview нет такой строки.")
-                        old_line = existing.preview.lines[edit.line_number - 1]
-                        source_line_number = old_line.source_line_number
-                        edit_source_id = old_line.source_id or source_id
+                        if (edit.line_number <= len(selections) and
+                                (edit.line_number > len(existing.preview.lines) or
+                                 selections[edit.line_number - 1].service_id != existing.preview.lines[edit.line_number - 1].service_id)):
+                            # A newly added service has no old line. Its historical
+                            # identity is resolved and checked by the adapter below.
+                            source_line_number = None
+                            edit_source_id = None
+                        else:
+                            old_line = existing.preview.lines[edit.line_number - 1]
+                            source_line_number = old_line.source_line_number
+                            edit_source_id = old_line.source_id or source_id
                     overrides.append(ResolvedPreviewLineOverride(**edit.model_dump(),
                         source_line_number=source_line_number, source_id=edit_source_id))
             resolved = ResolvedInvoiceCommand(

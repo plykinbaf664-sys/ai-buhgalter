@@ -760,7 +760,12 @@ class FirstBit:
             if index > len(lines):
                 raise UserProblem("В preview нет такой строки.")
             line = lines[index - 1]
-            if (line.source_id != edit.source_id or line.source_line_number != edit.source_line_number):
+            # Existing rows carry their exact historical identity. A newly added
+            # row obtains its identity from the live historical lookup above.
+            if edit.source_id is None and edit.source_line_number is None and command.services[index - 1].source_id is not None:
+                raise UserProblem("Источник существующей строки правки не подтверждён.")
+            if ((edit.source_id is not None or edit.source_line_number is not None)
+                    and (line.source_id != edit.source_id or line.source_line_number != edit.source_line_number)):
                 raise UserProblem("Источник или номер исторической строки изменился. Значения не перенесены.")
             tax = await self._preview_tax(edit.tax, line.tax) if edit.tax else None
             lines[index - 1] = line.overridden(edit.user_edit(), tax)

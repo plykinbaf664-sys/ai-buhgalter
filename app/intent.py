@@ -365,6 +365,9 @@ _ORDINAL_STEMS = (
 
 def _target_parts(target: str) -> tuple[int | None, str]:
     text = target.casefold().replace("ё", "е")
+    # Structured extraction may include the instruction after a valid row reference.
+    # That instruction is never part of the service name being matched.
+    text = re.split(r"\b(?:поменя\w*|измени\w*|исправ\w*|сдела\w*|постав\w*|удал\w*|убер\w*|остав\w*|количеств\w*|цен\w*)\b", text, maxsplit=1)[0]
     number_match = re.search(r"(?:строк\w*|пункт\w*|позици\w*|элемент\w*|номер|№)\s*[:#№-]?\s*(\d+)|(\d+)\s*(?:строк\w*|пункт\w*|позици\w*)", text)
     number = int(next(value for value in number_match.groups() if value)) if number_match else None
     if number is None:
@@ -378,7 +381,7 @@ def _target_parts(target: str) -> tuple[int | None, str]:
     name = re.sub(r"\b(?:строк\w*|пункт\w*|позици\w*|элемент\w*|номер|№)\b", " ", name)
     for _, stem in _ORDINAL_STEMS:
         name = re.sub(r"\b" + stem + r"[а-яе]*\b", " ", name)
-    name = re.sub(r"\b(?:и|или|в|во|на|пожалуйста|удали|удалить|изменить|измени|поменяй|исправь|строку|пункт)\b", " ", name)
+    name = re.sub(r"\b(?:и|или|в|во|на|пожалуйста|удали|удалить|изменить|измени|поменяй|исправь|строку|пункт|услуг\w*)\b", " ", name)
     name = re.sub(r"[^\w]+", " ", name, flags=re.UNICODE)
     return number, " ".join(name.split())
 
@@ -465,13 +468,27 @@ def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
     issues = []
     changed_fields: dict[tuple[str, str], object] = {}
 
+    expanded = []
     for mutation in mutations:
+        if (mutation.kind == "delete" and any(other.kind == "retain" for other in mutations)
+                and re.fullmatch(r"\s*остальн\w*\s*(?:удал\w*|убер\w*)\s*", mutation.target or "", re.I)):
+            # "Leave only X, delete the rest" is already represented by retain.
+            continue
+        # One spoken command often refers to several displayed items. Expand only
+        # explicit numeric lists, never a guessed range or a service-name match.
+        grouped = re.fullmatch(r"\s*(?:пункт\w*|строк\w*|позици\w*)\s*(\d+(?:\s*(?:,|и)\s*(?:(?:пункт\w*|строк\w*|позици\w*)\s*)?\d+)+)\s*", mutation.target or "", re.I)
+        if mutation.kind in ("delete", "retain") and grouped:
+            numbers = [int(number) for number in re.findall(r"\d+", grouped[1])]
+            expanded.extend(IntentDraftMutation(kind=mutation.kind, target=f"пункт {number}") for number in numbers)
+        else:
+            expanded.append(mutation)
+
+    for mutation in expanded:
         if mutation.kind == "add":
-            if any((mutation.price, mutation.tax, mutation.description, mutation.currency)):
-                raise UserProblem("Сначала добавьте услугу и проверьте новый preview; затем можно изменить её цену или НДС.")
             line_id = "draft:" + uuid4().hex
             states[line_id] = {"query": mutation.service, "quantity": mutation.quantity,
-                               "origin": None, "new": True, "override": {}}
+                               "origin": None, "new": True, "override": {key: getattr(mutation, key)
+                                   for key in ("price", "currency", "tax") if getattr(mutation, key) is not None}}
             order.append(line_id)
             continue
         try:
@@ -489,12 +506,12 @@ def apply_draft_mutations(prepared: PreparedInvoice, command: InvoiceCommand,
             retained.add(line_id)
             continue
         if mutation.kind == "replace":
-            if any((mutation.price, mutation.tax, mutation.description, mutation.currency)):
-                raise UserProblem("Сначала замените услугу и проверьте новый preview; затем можно изменить её цену или НДС.")
             old_index = order.index(line_id)
             replacement_id = "draft:" + uuid4().hex
             states[replacement_id] = {"query": mutation.service,
-                "quantity": mutation.quantity or state["quantity"], "origin": None, "new": True, "override": {}}
+                "quantity": mutation.quantity or state["quantity"], "origin": None, "new": True,
+                "override": {key: getattr(mutation, key) for key in ("price", "currency", "tax")
+                    if getattr(mutation, key) is not None}}
             order[old_index] = replacement_id
             deletes.add(line_id)
             continue

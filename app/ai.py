@@ -15,7 +15,7 @@ from app.parser import HELP, MONTHS, parse_command
 from app.validation import validate_json
 from app.intent import InvoiceDraft, InvoiceIntent, ground_intent
 from app.language import LANGUAGE_PROMPT, LanguageIntent, numbered_words, normalize_request_text, explicit_client_phrase, ground_explicit_period
-from app.language import InitialInvoiceRequest
+from app.language import DraftLineChange, InitialInvoiceRequest, PreviewTaxChange, SourceSpan, words
 from datetime import date
 
 
@@ -29,6 +29,100 @@ class Interpretation(StrictModel):
         if (self.command is None) == (self.intent is None):
             raise ValueError("Expected one interpretation")
         return self
+
+
+class PreviewEditRequest(StrictModel):
+    """Small extraction surface for an already displayed invoice preview."""
+    action: Literal["edit", "other", "cancel", "clarify"]
+    draft_changes: tuple[DraftLineChange, ...] = Field(max_length=20)
+    clarification: Literal["service", "tax", "unsupported"] | None
+
+
+PREVIEW_EDIT_PROMPT = """The user is editing an ALREADY DISPLAYED invoice preview.
+Return structured operations for the final user message only. No invoice data, service
+catalogue, customer names or prices are supplied to you. Do not invent any of them.
+Each operation must use exact word spans from the numbered ORIGINAL message.
+For update/delete/replace/retain, target_span identifies ONLY the existing row number
+or service name, without verbs, quantity, price or VAT words. If the user refers to
+several rows, return one operation per row. Never merge 'пункты 2 и 3' into one target.
+Use update for a change to an existing row; delete for removing it; retain for
+'leave only this'; add for a NEW service; replace for swapping a service.
+'Переименуй/назови/изменить название' changes ONLY the display description:
+use update with description_span. NEVER use replace for a rename. Replace is
+only for an explicit 'замени услугу X на услугу Y' request.
+'Добавь' always means add, even when quantity and price are also specified.
+Keep all independent changes in draft_changes, in the order spoken. Do not
+silently omit a change. An unchanged price is not an operation.
+Quantity source_span contains ONLY the explicit number words/digits; value matches it.
+price_span contains ONLY an explicit NET UNIT price number, never a row number or total.
+tax.source_span contains only explicit VAT words. Leave unspecified fields null.
+Service and description spans contain literal user words only. Do not translate names.
+For a request for another invoice, a date-only change, whole-document tax, or a
+request outside line editing return action=other and no draft_changes.
+Do not use action=other for add/delete/quantity/price/VAT/rename/replace/retain edits.
+If genuinely ambiguous, action=clarify and preserve any independent clear changes.
+You have no tools and cannot write to 1C."""
+
+
+def _word_span(source: str, start: int, end: int) -> SourceSpan:
+    indexes = [index for index, word in enumerate(words(source), 1)
+               if word.start() < end and word.end() > start]
+    return SourceSpan(first_word=indexes[0], last_word=indexes[-1])
+
+
+def repair_preview_extraction(result: PreviewEditRequest, source: str) -> PreviewEditRequest:
+    """Ground obvious row/VAT literals when a model span is too narrow.
+
+    This never supplies a number absent from the user's text. Multiple possible
+    rates or row references are deliberately left to the normal fail-closed path.
+    """
+    changes = list(result.draft_changes)
+    for index, change in enumerate(changes):
+        if change.kind == "replace" and change.target_span is not None and change.service_span is not None:
+            tokens = words(source)
+            between = source[tokens[change.target_span.last_word - 1].end():
+                             tokens[change.service_span.first_word - 1].start()]
+            if re.search(r"\b(?:переимен\w*|назов\w*|назван\w*|описан\w*)\b", between, re.I) and not re.search(
+                    r"\bзамен\w*\b", between, re.I):
+                changes[index] = DraftLineChange(kind="update", target_span=change.target_span,
+                    service_span=None, quantity=change.quantity, price_span=change.price_span,
+                    tax=change.tax, description_span=change.service_span)
+    rows = list(re.finditer(r"\b(?:пункт\w*|строк\w*|позици\w*)\s*\d+\b", source, re.I))
+    if len(rows) == 1:
+        row_span = _word_span(source, rows[0].start(), rows[0].end())
+        for index, change in enumerate(changes):
+            if change.target_span is None:
+                continue
+            target = change.target_span.text(source).strip(" ,:;.")
+            if re.fullmatch(r"(?:пункт\w*|строк\w*|позици\w*|цен\w*|(?:ндс|vat)(?:\s+\d+(?:[.,]\d+)?\s*%)?|налог\w*|колич\w*)", target, re.I):
+                changes[index] = DraftLineChange.model_validate({**change.model_dump(), "target_span": row_span})
+    rates = list(re.finditer(r"\b(?:НДС|VAT)\s*(\d+(?:[.,]\d+)?)\s*%", source, re.I))
+    if len(rates) == 1 and changes:
+        rate = rates[0]
+        tax_span = _word_span(source, rate.start(), rate.end())
+        rate_span = _word_span(source, rate.start(1), rate.end())
+        tax = PreviewTaxChange(kind="tax", line_number=None, source_span=tax_span,
+            mode="rate", rate_span=rate_span, profile_span=None)
+        explicit_tax_indexes = [index for index, change in enumerate(changes) if change.tax is not None]
+        candidates = []
+        if not explicit_tax_indexes:
+            for index, change in enumerate(changes):
+                anchor = change.target_span or change.service_span
+                if (change.kind in ("update", "add", "replace") and anchor is not None
+                        and words(source)[anchor.first_word - 1].start() < rate.start()):
+                    candidates.append((words(source)[anchor.first_word - 1].start(), index))
+        owner = (explicit_tax_indexes[0] if len(explicit_tax_indexes) == 1 else
+                 max(candidates)[1] if candidates and not explicit_tax_indexes else None)
+        if owner is not None:
+            # A tax-only fragment whose target is the VAT word is redundant after
+            # attaching that explicit rate to the preceding service operation.
+            redundant = [index for index, change in enumerate(changes) if index != owner
+                and change.tax is not None and change.quantity is None and change.price_span is None
+                and change.description_span is None and change.target_span is not None
+                and change.target_span.text(source).strip(" ,:;.").casefold() in ("ндс", "vat")]
+            changes[owner] = DraftLineChange.model_validate({**changes[owner].model_dump(), "tax": tax.model_dump()})
+            changes = [change for index, change in enumerate(changes) if index not in redundant]
+    return PreviewEditRequest(action=result.action, draft_changes=tuple(changes), clarification=result.clarification)
 
 
 class Extraction(StrictModel):
@@ -194,6 +288,39 @@ class CommandInterpreter:
             raise ExternalFailure("invalid_llm_response")
         return Interpretation(command=ground(extraction, text), needs_confirmation=True)
 
+    async def _preview_edit(self, text: str, context: InvoiceDraft | None) -> Interpretation | None:
+        if self.sdk_client is None:
+            return None
+        model = await self.model_selector.llm() if self.model_selector is not None else self.model
+        try:
+            response = await self._parse_sdk(model=model,
+                input=[{"role": "system", "content": PREVIEW_EDIT_PROMPT},
+                       {"role": "user", "content": f"Original message: {text}\nNumbered words:\n{numbered_words(text)}"}],
+                text_format=PreviewEditRequest, store=False, max_output_tokens=3500,
+                temperature=0 if model.startswith("gpt-4o-mini") else omit)
+        except Exception as exc:
+            name = type(exc).__name__.lower()
+            code = ("openai_timeout" if "timeout" in name or isinstance(exc, TimeoutError)
+                    else "invalid_llm_response" if isinstance(exc, ValidationError)
+                    else "openai_api_error")
+            raise ExternalFailure(code) from None
+        result = getattr(response, "output_parsed", None)
+        if not isinstance(result, PreviewEditRequest):
+            raise ExternalFailure("invalid_llm_response")
+        result = repair_preview_extraction(result, text)
+        if result.action == "other":
+            return None
+        if result.action == "cancel":
+            intent = LanguageIntent(action="cancel", client_change=None, date_change=None, period_change=None,
+                line_changes=(), tax_change=None, previous_hint_request=None, clarification=None)
+        else:
+            intent = LanguageIntent(action="edit" if result.draft_changes else "clarify",
+                client_change=None, date_change=None, period_change=None, line_changes=(),
+                tax_change=None, previous_hint_request=None, clarification=result.clarification,
+                draft_changes=result.draft_changes)
+        grounded = ground_intent(intent.to_intent(text, existing_draft=True), text, context or InvoiceDraft())
+        return Interpretation(intent=grounded, needs_confirmation=True)
+
     async def _intent(self, text: str, context: InvoiceDraft | None) -> Interpretation:
         if self.sdk_client is None and (self.client is None or self.api_key is None):
             raise UserProblem("Для свободных формулировок и правок включите AI. " + HELP)
@@ -276,7 +403,7 @@ Reject actual payment/deletion/instruction overrides, several invoices or an amb
             raise ExternalFailure("invalid_llm_response") from None
         return Interpretation(intent=ground_intent(intent, text, context), needs_confirmation=True)
 
-    async def interpret(self, text: str, context: InvoiceDraft | None = None) -> Interpretation:
+    async def interpret(self, text: str, context: InvoiceDraft | None = None, *, preview_ready: bool = False) -> Interpretation:
         # The language model cannot output amounts, rates, IDs or executable instructions.
         if not text.strip() or len(text) > 1000 or any(ord(char) < 32 and not char.isspace() for char in text):
             raise UserProblem(HELP)
@@ -296,6 +423,10 @@ Reject actual payment/deletion/instruction overrides, several invoices or an amb
             raise UserProblem("Укажите запрос на счёт или правку строки preview. Сам счёт, договор, компанию и учётные данные через этот запрос не удаляем и не меняем.")
         if len(re.findall(r"\bсч[её]т\b", guard_text, re.I)) > 1:
             raise UserProblem("Укажите один счёт за раз.")
+        if preview_ready:
+            edited = await self._preview_edit(text, context)
+            if edited is not None:
+                return edited
         legacy = (len(re.findall(r"\bза\b", text, re.I)) == 1
                   and re.search(r"\bсч[её]т\b", text, re.I)
                   and re.search(r" за (?:" + "|".join(MONTHS) + r")\b", text, re.I))

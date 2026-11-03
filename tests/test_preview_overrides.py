@@ -459,6 +459,87 @@ def test_add_and_replace_service_use_live_historical_basis_without_merging_rows(
     assert replaced.preview.lines[1].service_id == ref(15)
 
 
+@pytest.mark.parametrize("flow", [4], indirect=True)
+def test_model_broad_targets_and_grouped_delete_apply_against_displayed_preview(flow):
+    text = ("Пункт 1 поменять на 3 штуки, пункты 2 и 3 удали, "
+            "пункт 4 поменять на 5 штук")
+    send_draft_changes(flow, text, [
+        draft_change(text, "update", target="Пункт 1 поменять на 3 штуки", quantity=("3", 3)),
+        draft_change(text, "delete", target="пункты 2 и 3"),
+        draft_change(text, "update", target="пункт 4 поменять на 5 штук", quantity=("5", 5)),
+    ])
+    updated = prepared(flow)
+    assert [line.source_line_number for line in updated.preview.lines] == [1, 4]
+    assert [line.quantity for line in updated.preview.lines] == [3, 5]
+    assert updated.preview.total == updated.preview.subtotal + updated.preview.tax_amount
+
+
+def test_add_service_with_explicit_quantity_price_and_tax_in_one_message(flow):
+    text = "Добавь Payroll services 2 штуки по цене 150, НДС 0%"
+    tax_request = {"kind": "tax", "line_number": None, "source_span": span(text, "НДС 0%"),
+        "mode": "rate", "rate_span": span(text, "0%"), "profile_span": None}
+    send_draft_changes(flow, text, [draft_change(text, "add", service="Payroll services",
+        quantity=("2", 2), price_span="150", tax=tax_request)])
+    added = prepared(flow)
+    assert len(added.preview.lines) == 3, flow["sent"][-1]["text"]
+    line = added.preview.lines[-1]
+    assert line.quantity == 2 and line.price == 150 and line.tax.rate == 0
+    assert line.total == 300
+
+
+def test_replace_service_with_explicit_quantity_price_and_tax_in_one_message(flow):
+    text = "Замени пункт 2 на Payroll services, количество 3, цена 150, НДС 0%"
+    tax_request = {"kind": "tax", "line_number": None, "source_span": span(text, "НДС 0%"),
+        "mode": "rate", "rate_span": span(text, "0%"), "profile_span": None}
+    send_draft_changes(flow, text, [draft_change(text, "replace", target="пункт 2",
+        service="Payroll services", quantity=("3", 3), price_span="150", tax=tax_request)])
+    updated = prepared(flow)
+    assert len(updated.preview.lines) == 2, flow["sent"][-1]["text"]
+    line = updated.preview.lines[1]
+    assert line.service_id == ref(15) and line.quantity == 3
+    assert line.price == 150 and line.tax.rate == 0 and line.total == 450
+
+
+def test_target_generic_service_noun_is_not_part_of_name(flow):
+    name = prepared(flow).preview.lines[-1].description
+    text = f"Услугу {name} сделай 3 штуки"
+    send_draft_changes(flow, text, [draft_change(text, "update", target=f"Услугу {name}", quantity=("3", 3))])
+    assert prepared(flow).preview.lines[-1].quantity == 3
+
+
+def test_keep_only_ignores_redundant_delete_the_rest(flow):
+    text = "Оставь только Bookkeeping synthetic row 1; остальные удали"
+    send_draft_changes(flow, text, [
+        draft_change(text, "retain", target="Bookkeeping synthetic row 1"),
+        draft_change(text, "delete", target="остальные удали"),
+    ])
+    assert [line.description for line in prepared(flow).preview.lines] == ["Bookkeeping synthetic row 1"], flow["sent"][-1]["text"]
+
+
+@pytest.mark.parametrize("flow", [4], indirect=True)
+@pytest.mark.parametrize("voice", [False, True])
+def test_actual_bot_uses_focused_editor_for_multi_action_text_and_voice(flow, voice):
+    from types import SimpleNamespace
+    from pydantic import SecretStr
+    from app.ai import CommandInterpreter, PreviewEditRequest
+    text = "Пункт 2 удали, пункт 3 поменяй на 5 штук, пункт 1 сделай 3 штуки"
+    changes = [draft_change(text, "delete", target="Пункт 2"),
+        draft_change(text, "update", target="пункт 3", quantity=("5", 5)),
+        draft_change(text, "update", target="пункт 1", quantity=("3", 3))]
+    async def parse(**kwargs):
+        assert kwargs["text_format"] is PreviewEditRequest
+        return SimpleNamespace(output_parsed=PreviewEditRequest.model_validate_json(json.dumps({
+            "action": "edit", "draft_changes": changes, "clarification": None})))
+    flow["client"].app.state.bot.interpreter = CommandInterpreter(api_key=SecretStr("synthetic"),
+        model="gpt-5-mini", sdk_client=SimpleNamespace(responses=SimpleNamespace(parse=parse)),
+        send_draft_context=False)
+    send(flow, text, voice=voice)
+    updated = prepared(flow)
+    assert [line.source_line_number for line in updated.preview.lines] == [1, 3, 4]
+    assert [line.quantity for line in updated.preview.lines] == [3, 5, 1]
+    assert "Предварительный счёт" in flow["sent"][-1]["text"]
+
+
 def test_price_tax_and_rename_can_be_one_grounded_mutation(flow):
     original = prepared(flow)
     text = "В первой строке цена 1200, НДС 0%, название Bookkeeping Q4 service"
