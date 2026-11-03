@@ -24,4 +24,6 @@ Prove quantity, price, rename, add, delete, replace, retain and multiple actions
 
 - [x] Diagnose production model behavior and deterministic grounding gaps using synthetic real-model probes.
 - [x] Implement a focused preview edit path and complete safe application of its operations.
-- [ ] Verify and deploy.
+- [x] Verify and deploy: 806 Linux tests passed; synthetic application GET smoke passed;
+  real OpenAI synthetic utterances checked; release `ddf3f4b` active with deep readiness READY.
+  No FirstBit mutation or Telegram customer message was sent during verification.
