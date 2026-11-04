@@ -1,5 +1,7 @@
 """Synthetic native-provider contract proofs. No captured/prod records or sessions."""
 import asyncio
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -9,13 +11,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
+from app.bot import Bot
 from app.main import create_app
 from app.domain import (Invoice, InvoiceConflict, TaxInvoicePdf, TaxPdfProvenance,
-                        TaxInvoice, TaxInvoiceReference, TaxOperationState, WorkflowFailure, WritesDisabled)
+                        TaxInvoice, TaxInvoiceReference, TaxOperationState, WorkflowFailure, WritesDisabled,
+                        InvoiceCommand, UserProblem)
 from app.fake_onec import FakeOneC
 from app.operations import OperationJournal, MutationUncertain, JournalUnavailable
 from app.parser import parse_command
 from app.service import InvoiceService
+from app.telegram_models import CallbackQuery
 
 TEXT = 'Сформируй счет для ООО Ромашка за сентябрь 2026 года'
 PDF = b'%PDF-1.7\nSYNTHETIC NATIVE PRINT CONTRACT TEST ONLY\n%%EOF'
@@ -175,6 +180,60 @@ def test_posted_invoice_can_gain_tax_invoice_on_later_retry_after_restart(tmp_pa
         assert backend.creates == backend.source_posts == backend.generates == backend.prints == 1
         assert (await service(backend).execute(prepared, 'repeat', 123)) == result
         assert backend.generates == 1
+
+    asyncio.run(scenario())
+
+
+def test_repeated_request_offers_original_invoice_tax_continuation(tmp_path):
+    class TemporarilyUnavailableTax(SyntheticTaxProvider):
+        tax_read_available = False
+
+        async def read_tax_operation(self, basis, invoice, operation_id):
+            if not self.tax_read_available:
+                raise TimeoutError('Synthetic lookup unavailable')
+            return await super().read_tax_operation(basis, invoice, operation_id)
+
+    backend = TemporarilyUnavailableTax(store(tmp_path / 'private/operations.sqlite'))
+
+    async def scenario():
+        original = await prepare(backend)
+        with pytest.raises(WorkflowFailure):
+            await service(backend).execute(original, 'first-confirm', 123)
+        assert backend.creates == backend.source_posts == 1 and backend.generates == 0
+        old_service = backend.services['service-accounting']
+        backend.services['service-accounting'] = old_service.model_copy(update={'price': Decimal('1300')})
+        backend.journal = store(backend.journal.path, create=False)
+        backend.tax_read_available = True
+        bot = Bot(service(backend), None, None)
+        repeated = await prepare(backend)
+        assert repeated.operation_id == original.operation_id
+        assert repeated.preview.digest != original.preview.digest
+        prompt = bot.show_preview(123, repeated, parse_command(TEXT))
+        assert 'Tax Invoice' in prompt.text and 'Новый Invoice не создаётся' in prompt.text
+        assert 'Создать Tax Invoice' in prompt.reply_markup.inline_keyboard[0][0].text
+        assert 'Ранее подтверждённые данные' in prompt.text
+        assert 123 not in bot.pending
+        callback_data = prompt.reply_markup.inline_keyboard[0][0].callback_data
+        callback = lambda uid: CallbackQuery.model_validate({'id': 'synthetic-callback',
+            'from': {'id': uid, 'is_bot': False},
+            'message': {'message_id': 1, 'chat': {'id': uid, 'type': 'private'}},
+            'data': callback_data})
+        with pytest.raises(UserProblem):
+            await bot.prepare_callback(callback(456), 'foreign')
+        selected = await bot.prepare_callback(callback(123), 'continue')
+        assert selected == original
+        result = await bot.service.execute(selected, 'continue', 123)
+        assert result.tax_invoice.posted and result.pdf is not None
+        assert backend.creates == backend.source_posts == backend.generates == 1
+        backend.journal.claim_delivery(original.operation_id, 123)
+        backend.journal.delivered(original.operation_id, 123)
+        finished = bot.show_preview(123, repeated, parse_command(TEXT))
+        assert finished.reply_markup is None and 'PDF уже был доставлен' in finished.text
+        other = await bot.service.prepare(
+            InvoiceCommand(client='ООО Ромашка', invoice_date=date(2026, 12, 1)), 'other', 123)
+        fresh = bot.show_preview(123, other, InvoiceCommand(client='ООО Ромашка', invoice_date=date(2026, 12, 1)))
+        assert any(button.callback_data.startswith('invoice:confirm:')
+                   for row in fresh.reply_markup.inline_keyboard for button in row)
 
     asyncio.run(scenario())
 

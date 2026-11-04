@@ -359,8 +359,8 @@ def test_repeated_confirm_and_redelivery_after_restart_do_not_duplicate(tmp_path
         client.headers['X-Telegram-Bot-Api-Secret-Token'] = 's' * 32
         assert client.post('/telegram/webhook', json=confirm).status_code == 200
         client.post('/telegram/webhook', json=update(3, TEXT))
-        token = client.app.state.bot.pending[123].token
-        assert client.post('/telegram/webhook', json=update(4, '/confirm ' + token)).status_code == 200
+        assert 123 not in client.app.state.bot.pending
+        assert client.app.state.bot.service.journal.delivery_status(prepared().operation_id, 123) == 'delivered'
     assert len(backend.documents) == 1 and sent.count('sendDocument') == 1
 
 

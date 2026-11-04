@@ -83,7 +83,7 @@ class CallbackAction(StrictModel):
 
 class ConfirmationPrompt(StrictModel):
     text: str
-    reply_markup: InlineKeyboardMarkup
+    reply_markup: InlineKeyboardMarkup | None = None
 
 
 class SupplierReviewScope(StrictModel):
@@ -206,8 +206,79 @@ class Bot:
         return ConfirmationPrompt(text="\n".join(rows),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
+    def _existing_operation_prompt(self, uid: int, prepared: PreparedInvoice) -> ConfirmationPrompt | None:
+        journal = self.service.journal
+        if journal is None:
+            return None
+        direct = journal.get_for_user(prepared.operation_id, uid)
+        candidates = ([prepared] if direct is not None else
+            [item for item in self.recoveries.get(uid, {}).values()
+             if (item.request.client_id == prepared.request.client_id
+                 and item.preview.invoice_date == prepared.preview.invoice_date
+                 and item.preview.service_period == prepared.preview.service_period)])
+        matches = []
+        for item in candidates:
+            owned = journal.get_for_user(item.operation_id, uid)
+            if owned is not None:
+                matches.append(owned)
+        if not matches:
+            return None
+        self.pending.pop(uid, None)
+        if len(matches) > 1:
+            rows = ["Для этой компании и даты есть несколько подтверждённых операций. Выберите нужный Invoice:"]
+            buttons = []
+            for number, (stored, delivery) in enumerate(matches, 1):
+                invoice = stored.invoice
+                rows.append(f"{number}. №{invoice.number or invoice.document_id if invoice else 'результат уточняется'}; "
+                            f"{stored.prepared.preview.total} {stored.prepared.preview.currency}; "
+                            f"{stored.prepared.preview.invoice_date:%d.%m.%Y}")
+                if delivery == 'ready':
+                    self._remember_recovery(uid, stored.prepared)
+                    buttons.append([InlineButton(text=f"Продолжить {number}",
+                        callback_data=f"recovery:{stored.prepared.operation_id[:16]}")])
+            if not buttons:
+                return ConfirmationPrompt(text="\n".join(rows) + "\nДоставка этих операций уже завершена или её результат неизвестен.")
+            return ConfirmationPrompt(text="\n".join(rows) + "\nПеред продолжением сверю документ с 1С.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+        stored, delivery = matches[0]
+        frozen = stored.prepared
+        invoice = stored.invoice
+        if invoice is None:
+            status = "Предыдущая операция подтверждена, но создание Invoice пока не доказано."
+            action = "Сверить и продолжить"
+        elif not invoice.posted:
+            status = f"По журналу Invoice №{invoice.number or invoice.document_id} создан как черновик."
+            action = "Сверить и продолжить"
+        elif stored.tax is None:
+            status = f"По журналу Invoice №{invoice.number or invoice.document_id} уже проведён. Tax Invoice ещё не подтверждён."
+            action = "Создать Tax Invoice"
+        elif stored.tax.invoice is None:
+            status = "Invoice проведён. Результат создания Tax Invoice пока неизвестен."
+            action = "Сверить Tax Invoice"
+        else:
+            status = (f"Invoice проведён. Связанный Tax Invoice №"
+                      f"{stored.tax.invoice.number or stored.tax.invoice.document_id} уже найден.")
+            action = "Получить PDF"
+        text = (status + "\nПеред следующим действием проверю оба документа в 1С. "
+                "Новый Invoice не создаётся.\n\nРанее подтверждённые данные:\n"
+                + preview_text(frozen.preview))
+        if delivery == 'delivered':
+            return ConfirmationPrompt(text=text + "\nPDF уже был доставлен. Повторно документы и файл не создаём.")
+        if delivery == 'sending':
+            return ConfirmationPrompt(text=text + "\nДоставка PDF могла завершиться; проверьте чат. Автоматически повторять отправку нельзя.")
+        if delivery == 'finalized':
+            return ConfirmationPrompt(text=text + "\nОперация завершена без PDF; нужна отдельная проверка оператором.")
+        self._remember_recovery(uid, frozen)
+        text += ("\nСозданный Invoice нельзя изменить правкой preview в боте. "
+                 "Для изменения записанного документа нужен отдельный проверенный workflow в 1С.") if invoice is not None else ""
+        return ConfirmationPrompt(text=text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineButton(text=action, callback_data=f"recovery:{frozen.operation_id[:16]}")]]))
+
     def show_preview(self, uid: int, prepared: PreparedInvoice, command: InvoiceCommand,
                      notice: str = "") -> ConfirmationPrompt:
+        existing = self._existing_operation_prompt(uid, prepared)
+        if existing is not None:
+            return existing
         previous_context = self.contexts.get(uid)
         selected_id = (previous_context.selected_client_id if previous_context is not None
                        and previous_context.draft.client == command.client else None)

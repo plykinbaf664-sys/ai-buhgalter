@@ -215,6 +215,21 @@ class OperationJournal:
         with self._connection() as db:
             return self._load(db, operation_id)
 
+    def get_for_user(self, operation_id: str, user_id: int) -> tuple[StoredOperation, str] | None:
+        """Return a confirmed operation only to the Telegram user who confirmed it."""
+        if type(user_id) is not int or not 0 < user_id < 2**52:
+            raise ValueError("Invalid journal owner")
+        with self._connection() as db:
+            self._check_namespace(db)
+            row = db.execute("SELECT phase FROM deliveries WHERE operation_id=? AND user_id=?",
+                             (operation_id, user_id)).fetchone()
+            if row is None:
+                return None
+            stored = self._load(db, operation_id)
+            if stored is None or row[0] not in ("ready", "sending", "delivered", "finalized"):
+                raise JournalUnavailable()
+            return stored, row[0]
+
     def reserve(self, prepared: PreparedInvoice, user_id: int) -> StoredOperation:
         prepared = PreparedInvoice.model_validate(prepared)
         if type(user_id) is not int or not 0 < user_id < 2**52:
