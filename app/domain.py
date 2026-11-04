@@ -632,6 +632,10 @@ class InvoiceConflict(Exception):
     """An existing document is bound to a different confirmed snapshot."""
 
 
+class SourceMarkedForDeletion(InvoiceConflict):
+    """A previously confirmed source document is still present but marked deleted."""
+
+
 class WritesDisabled(Exception):
     pass
 

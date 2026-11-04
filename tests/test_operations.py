@@ -1,6 +1,8 @@
 """Durability proofs use synthetic accounting data, never a live FirstBit write."""
 import asyncio
 from concurrent.futures import ProcessPoolExecutor
+from datetime import date
+import hashlib
 import multiprocessing
 import os
 from pathlib import Path
@@ -11,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.domain import Invoice, InvoiceConflict, OperationState, WorkflowFailure
+from app.domain import Invoice, InvoiceCommand, InvoiceConflict, OperationState, UserProblem, WorkflowFailure
 from app.fake_onec import FakeOneC
 from app.main import create_app
 from app.operations import JournalUnavailable, MutationUncertain, OperationJournal
@@ -27,6 +29,11 @@ def journal(path):
 
 def prepared(backend=None):
     return asyncio.run(InvoiceService(backend or FakeOneC()).prepare(parse_command(TEXT), "prepare", 123))
+
+
+def prepared_on(backend, day, client="ООО Ромашка"):
+    return asyncio.run(InvoiceService(backend).prepare(
+        InvoiceCommand(client=client, invoice_date=day), "prepare", 123))
 
 
 def _claim_in_process(path):
@@ -49,6 +56,77 @@ def test_cross_process_atomic_claim_and_reopen(tmp_path):
     reopened = journal(path)
     assert reopened.get(value.operation_id).phase == "create_started"
     assert reopened.recoveries() == {123: value}
+
+
+def test_multiple_unfinished_operations_are_restored_without_choosing_one(tmp_path):
+    backend = FakeOneC()
+    first = prepared_on(backend, date(2026, 9, 1))
+    second = prepared_on(backend, date(2026, 10, 1))
+    store = journal(tmp_path / "state" / "operations.sqlite")
+    store.reserve(first, 123)
+    store.reserve(second, 123)
+    restored = journal(store.path).pending_recoveries()
+    assert {item.operation_id for item in restored[123]} == {first.operation_id, second.operation_id}
+    with pytest.raises(JournalUnavailable):
+        store.recoveries()
+
+
+def test_distinct_invoice_can_be_confirmed_while_old_operation_waits(tmp_path):
+    backend = FakeOneC()
+    first = prepared_on(backend, date(2026, 9, 1), "ООО Двойник 1")
+    second = prepared_on(backend, date(2026, 10, 1), "ООО Двойник 2")
+    store = OperationJournal(tmp_path / "state" / "operations.sqlite",
+        namespace="invoice:v1:mock:" + hashlib.sha256(b"FakeOneC").hexdigest(), create=True)
+    store.reserve(first, 123)
+    store.reserve(second, 123)
+    settings = app_settings(store.path)
+    sent = []
+
+    def respond(request):
+        sent.append(request.url.path.rsplit("/", 1)[-1])
+        if request.url.path.endswith("answerCallbackQuery"):
+            return httpx.Response(200, json={"ok": True, "result": True})
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1, "chat": {"id": 123}}})
+
+    def app():
+        return create_app(settings, backend=backend, telegram_transport=httpx.MockTransport(respond))
+
+    with TestClient(app()) as client:
+        client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
+        bot = client.app.state.bot
+        waiting = bot._retry_choice(123)
+        assert len(waiting.reply_markup.inline_keyboard) == 2
+        with pytest.raises(UserProblem):
+            bot._choose_recovery(456, first.operation_id[:16])
+        current = prepared_on(backend, date(2026, 11, 1))
+        prompt = bot.show_preview(123, current, InvoiceCommand(client="ООО Ромашка", invoice_date=date(2026, 11, 1)))
+        assert any(button.callback_data.startswith("invoice:confirm:")
+                   for row in prompt.reply_markup.inline_keyboard for button in row)
+        token = bot.pending[123].token
+        assert client.post("/telegram/webhook", json=update(1, "/confirm " + token)).status_code == 200
+        assert len(backend.documents) == 1
+        assert set(bot.recoveries[123]) == {first.operation_id, second.operation_id}
+        same = bot.show_preview(123, first, InvoiceCommand(client="ООО Двойник 1", invoice_date=date(2026, 9, 1)))
+        assert not any(button.callback_data.startswith("invoice:confirm:")
+                       for row in same.reply_markup.inline_keyboard for button in row)
+    with TestClient(app()) as client:
+        client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
+        bot = client.app.state.bot
+        assert set(bot.recoveries[123]) == {first.operation_id, second.operation_id}
+        next_invoice = prepared_on(backend, date(2026, 12, 1))
+        bot.show_preview(123, next_invoice, InvoiceCommand(client="ООО Ромашка", invoice_date=date(2026, 12, 1)))
+        next_token = bot.pending[123].token
+        assert client.post("/telegram/webhook", json=update(2, "/retry")).status_code == 200
+        callback = {"update_id": 3, "callback_query": {"id": "recovery-choice",
+            "from": {"id": 123, "is_bot": False}, "message": {"message_id": 1,
+            "chat": {"id": 123, "type": "private"}}, "data": "recovery:" + first.operation_id[:16]}}
+        assert client.post("/telegram/webhook", json=callback).status_code == 200
+        assert len(backend.documents) == 2
+        assert set(bot.recoveries[123]) == {second.operation_id}
+        assert bot.pending[123].token == next_token
+        assert bot.contexts[123].prepared.operation_id == next_invoice.operation_id
+        assert client.post("/telegram/webhook", json=callback).status_code == 200
+        assert len(backend.documents) == 2
 
 
 def test_confirmed_snapshot_conflict_and_provider_scope(tmp_path):

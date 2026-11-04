@@ -10,7 +10,7 @@ from xml.etree.ElementTree import SubElement, tostring
 import httpx
 import pytest
 
-from app.domain import InvoiceCommand, InvoiceConflict, WorkflowFailure, WritesDisabled
+from app.domain import InvoiceCommand, InvoiceConflict, SourceMarkedForDeletion, WorkflowFailure, WritesDisabled
 from app.firstbit import FirstBitSettings
 from app.firstbit_write import FirstBitWrite, execution_schema
 from app.operations import MutationUncertain, OperationJournal
@@ -166,6 +166,33 @@ def test_confirmed_create_readback_repeat_and_restart_keep_one_real_adapter_draf
             assert result == result2 and fixture.posts == 1
         finally:
             await backend.aclose()
+    asyncio.run(scenario())
+
+
+def test_marked_source_is_seen_by_get_and_never_recreated(tmp_path):
+    fixture = WriteFixture()
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            prepared = await prepare(backend)
+            await InvoiceService(backend, journal=backend.journal, allow_real_writes=True).execute(
+                prepared, 'first', 123)
+            assert len(fixture.created) == 1
+            fixture.created[0]['DeletionMark'] = True
+            fixture.created[0]['Posted'] = False
+            prior_writes = len([call for call in fixture.calls if call.method != 'GET'])
+            with pytest.raises(SourceMarkedForDeletion):
+                await backend.read_operation(prepared.basis, prepared.operation_id)
+            with pytest.raises(WorkflowFailure) as failure:
+                await InvoiceService(backend, journal=backend.journal, allow_real_writes=True).execute(
+                    prepared, 'retry', 123)
+            assert failure.value.stage == 'source_deleted'
+            assert len(fixture.created) == 1
+            assert len([call for call in fixture.calls if call.method != 'GET']) == prior_writes
+        finally:
+            await backend.aclose()
+
     asyncio.run(scenario())
 
 

@@ -9,6 +9,7 @@ from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCan
                         ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection, ResolvedPreviewLineOverride,
                         PreviewLineOrigin,
                         ServiceProblem, ServiceChoiceRequired, InitialQuantityRequired, StaleBasis, StrictModel, UserProblem,
+                        SourceMarkedForDeletion,
                         WorkflowFailure, WritesDisabled, TaxInvoice, TaxInvoiceReference, TaxInvoicePdf, TaxOperationState)
 from app.operations import MutationUncertain, OperationJournal
 
@@ -293,6 +294,8 @@ class InvoiceService:
             if refreshed.basis.key != prepared.basis.key:
                 raise ValueError("Provider changed billing identity during refresh")
             return refreshed
+        except SourceMarkedForDeletion:
+            raise UserProblem("Ранее подтверждённый Invoice помечен на удаление в 1С. Новый счёт по тому же основанию не создаём; восстановите исходный документ и отправьте /retry.") from None
         except InvoiceConflict:
             raise UserProblem("На это основание уже создан счёт с другими данными. Изменять его автоматически нельзя. Обратитесь к оператору.") from None
         except (UserProblem, WorkflowFailure):
@@ -413,6 +416,8 @@ class InvoiceService:
             event(request_id=request_id, user_id=user_id, stage='tax_pdf', status='success',
                   operation_id=operation_id, document_id=tax.document_id)
             return InvoiceResult(invoice=source, tax_invoice=tax, pdf=pdf)
+        except SourceMarkedForDeletion:
+            raise WorkflowFailure('source_deleted', source.document_id, operation_id, 'unknown') from None
         except WorkflowFailure:
             raise
         except MutationUncertain:
@@ -506,6 +511,8 @@ class InvoiceService:
             event(request_id=request_id, user_id=user_id, stage=stage, status="success",
                   operation_id=operation_id, document_id=document_id)
             return InvoiceResult(invoice=invoice, pdf=pdf)
+        except SourceMarkedForDeletion:
+            raise WorkflowFailure('source_deleted', document_id, operation_id, 'unknown') from None
         except WorkflowFailure:
             raise
         except MutationUncertain:

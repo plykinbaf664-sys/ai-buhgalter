@@ -290,13 +290,13 @@ def test_unknown_state_allows_a_new_preview_but_never_a_second_confirmation(work
     monkeypatch.setattr(workflow[1], "read_operation", unknown)
     press(workflow, token(workflow))
     bot = workflow[0].app.state.bot
-    frozen = bot.recoveries[123]
+    frozen = next(iter(bot.recoveries[123].values()))
     assert not workflow[1].documents
 
     # Repeating a request is safe up to preview, even while the prior confirmed operation is unknown.
     send(workflow, TEXT, initial(), number=2)
     assert preview(workflow).digest == frozen.preview.digest
-    assert bot.recoveries[123] == frozen
+    assert bot.recoveries[123] == {frozen.operation_id: frozen}
     pending = bot.pending[123]
     callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
     assert f"invoice:confirm:{pending.token}" not in callbacks
@@ -305,11 +305,11 @@ def test_unknown_state_allows_a_new_preview_but_never_a_second_confirmation(work
 
     # Even a forged/direct confirmation remains guarded in the service path.
     press(workflow, f"invoice:confirm:{pending.token}", 101)
-    assert not workflow[1].documents and bot.recoveries[123] == frozen
+    assert not workflow[1].documents and bot.recoveries[123] == {frozen.operation_id: frozen}
     send(workflow, "/cancel", number=102)
-    assert 123 not in bot.pending and bot.recoveries[123] == frozen
+    assert 123 not in bot.pending and bot.recoveries[123] == {frozen.operation_id: frozen}
     send(workflow, "/retry", number=3)
-    assert not workflow[1].documents and bot.recoveries[123] == frozen
+    assert not workflow[1].documents and bot.recoveries[123] == {frozen.operation_id: frozen}
 
 
 @pytest.mark.parametrize("fault,state", [("create_lost_response", "draft"), ("post_lost_response", "posted")])
@@ -321,12 +321,12 @@ def test_timeout_after_real_fake_effect_recovers_same_confirmed_snapshot(workflo
     confirmed = preview(workflow)
     press(workflow, token(workflow))
     assert len(backend.documents) == 1
-    frozen = workflow[0].app.state.bot.recoveries[123]
+    frozen = next(iter(workflow[0].app.state.bot.recoveries[123].values()))
     send(workflow, TEXT, initial(), number=2)
     pending = workflow[0].app.state.bot.pending[123]
     callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
     assert f"invoice:confirm:{pending.token}" not in callbacks
-    assert workflow[0].app.state.bot.recoveries[123] == frozen
+    assert workflow[0].app.state.bot.recoveries[123] == {frozen.operation_id: frozen}
     send(workflow, "/retry", number=3)
     assert len(backend.documents) == 1
     assert next(iter(backend.documents.values())).preview_digest == confirmed.digest == frozen.preview.digest
@@ -431,12 +431,12 @@ def test_refresh_lookup_timeout_allows_preview_but_blocks_new_confirmation(workf
     monkeypatch.setattr(workflow[1], "read_operation", failed)
     press(workflow, token(workflow))
     bot = workflow[0].app.state.bot
-    frozen = bot.recoveries[123]
+    frozen = next(iter(bot.recoveries[123].values()))
     send(workflow, TEXT, initial(), number=2)
     assert bot.pending[123].prepared.preview.digest == frozen.preview.digest
     callbacks = [button["callback_data"] for row in prompt(workflow)["reply_markup"]["inline_keyboard"] for button in row]
     assert not any("invoice:confirm:" in callback for callback in callbacks)
-    assert bot.recoveries[123] == frozen and not workflow[1].documents
+    assert bot.recoveries[123] == {frozen.operation_id: frozen} and not workflow[1].documents
 
 
 
@@ -503,11 +503,11 @@ def test_unknown_operation_allows_voice_preview_without_unblocking_confirmation(
     monkeypatch.setattr(workflow[1], "read_operation", unknown)
     press(workflow, token(workflow))
     bot = workflow[0].app.state.bot
-    frozen = bot.recoveries[123]
+    frozen = next(iter(bot.recoveries[123].values()))
     stt_calls = sum(request.url.path.endswith("transcriptions") for request in workflow[5])
     send(workflow, TEXT, initial(), number=2, voice=True)
     assert sum(request.url.path.endswith("transcriptions") for request in workflow[5]) == stt_calls + 1
-    assert bot.recoveries[123] == frozen and not workflow[1].documents
+    assert bot.recoveries[123] == {frozen.operation_id: frozen} and not workflow[1].documents
     assert bot.pending[123].prepared.preview.digest == frozen.preview.digest
 
 

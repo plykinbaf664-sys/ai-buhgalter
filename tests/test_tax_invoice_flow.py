@@ -150,6 +150,35 @@ def test_native_chain_reads_actual_state_and_never_reposts_already_posted_tax(ge
     asyncio.run(scenario())
 
 
+def test_posted_invoice_can_gain_tax_invoice_on_later_retry_after_restart(tmp_path):
+    class LaterTaxProvider(SyntheticTaxProvider):
+        tax_read_available = False
+
+        async def read_tax_operation(self, basis, invoice, operation_id):
+            if not self.tax_read_available:
+                raise TimeoutError('Synthetic tax lookup temporarily unavailable')
+            return await super().read_tax_operation(basis, invoice, operation_id)
+
+    backend = LaterTaxProvider(store(tmp_path / 'private/operations.sqlite'))
+
+    async def scenario():
+        prepared = await prepare(backend)
+        with pytest.raises(WorkflowFailure):
+            await service(backend).execute(prepared, 'first', 123)
+        saved = backend.journal.get(prepared.operation_id)
+        assert saved.phase == 'posted' and saved.invoice.posted and saved.tax is None
+        assert backend.creates == backend.source_posts == 1 and backend.generates == 0
+        backend.journal = store(backend.journal.path, create=False)
+        backend.tax_read_available = True
+        result = await service(backend).execute(prepared, 'later', 123)
+        assert result.tax_invoice.posted and result.pdf.provenance.template == 'TaxInvoiceLandscapeEN'
+        assert backend.creates == backend.source_posts == backend.generates == backend.prints == 1
+        assert (await service(backend).execute(prepared, 'repeat', 123)) == result
+        assert backend.generates == 1
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('fault', ['generate_before_commit', 'generate_after_commit'])
 def test_generation_lost_response_restart_reconciles_without_duplicate(fault, tmp_path):
     backend = SyntheticTaxProvider(store(tmp_path / 'private/operations.sqlite'))

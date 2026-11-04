@@ -16,7 +16,7 @@ import xml.etree.ElementTree as ET
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.domain import (AccountingReference, BackendFailure, BillingBasis, ExecutionReview,
-                        ExternalModel, Invoice, InvoiceConflict, InvoicePreview, Label,
+                        ExternalModel, Invoice, InvoiceConflict, InvoicePreview, Label, SourceMarkedForDeletion,
                         Money, OperationState, UserProblem, WritesDisabled)
 from app.firstbit import FirstBit, HistoricalInvoice, HistoricalLine, Page, Record, ZERO
 from app.firstbit_write_schema import inspect_write_schema
@@ -540,7 +540,9 @@ class FirstBitWrite(FirstBit):
             # linked TaxInvoice itself; this flag is never tax/existence authority.
             # Keep every financial/accounting value and the frozen create body exact.
             compared={key:entry for key,entry in expected.items() if key!='TaxInvoiceIsRequired'}
-        if value.DeletionMark or value.Comment != marker or _canonical({key: actual[key] for key in compared}) != _canonical(compared):
+        if value.DeletionMark:
+            raise SourceMarkedForDeletion()
+        if value.Comment != marker or _canonical({key: actual[key] for key in compared}) != _canonical(compared):
             raise InvoiceConflict()
         return Invoice(document_id=str(value.Ref_Key), number=value.Number, posted=value.Posted, client_id=basis.client_id,
             basis_key=basis.key, revision=value.DataVersion, preview_digest=basis.preview.digest)

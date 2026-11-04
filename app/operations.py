@@ -416,15 +416,22 @@ class OperationJournal:
                 raise JournalUnavailable()
 
     def recoveries(self) -> dict[int, PreparedInvoice]:
+        grouped = self.pending_recoveries()
+        if any(len(items) != 1 for items in grouped.values()):
+            # Legacy single-recovery callers must never choose an arbitrary one.
+            raise JournalUnavailable()
+        return {user_id: items[0] for user_id, items in grouped.items()}
+
+    def pending_recoveries(self) -> dict[int, tuple[PreparedInvoice, ...]]:
+        """All durable unfinished operations, grouped by their Telegram owner."""
         with self._connection() as db:
             self._check_namespace(db)
-            result = {}
-            for row in db.execute("SELECT user_id,operation_id,phase FROM deliveries WHERE phase NOT IN ('delivered','finalized')").fetchall():
-                if row["phase"] not in ("ready", "sending") or row["user_id"] in result:
-                    # Never silently choose one of several unfinished operations.
+            result: dict[int, list[PreparedInvoice]] = {}
+            for row in db.execute("SELECT user_id,operation_id,phase FROM deliveries WHERE phase NOT IN ('delivered','finalized') ORDER BY user_id,operation_id").fetchall():
+                if row["phase"] not in ("ready", "sending"):
                     raise JournalUnavailable()
                 stored = self._load(db, row["operation_id"])
                 if stored is None or not 0 < row["user_id"] < 2**52:
                     raise JournalUnavailable()
-                result[row["user_id"]] = stored.prepared
-            return result
+                result.setdefault(row["user_id"], []).append(stored.prepared)
+            return {user_id: tuple(items) for user_id, items in result.items()}

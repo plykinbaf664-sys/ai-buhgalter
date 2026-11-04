@@ -64,10 +64,10 @@ Document identity and confirmed digest are checked throughout; posting must keep
 | State | `/retry` | New input / cancel |
 |---|---|---|
 | Readonly draft after discovery/read failure | Reuses typed draft/selection; discovery if incomplete or prepare new proposal, no new STT/LLM | Can replace/cancel draft |
-| Frozen confirmed operation recovery | Continues the same PreparedInvoice/operation ID after authoritative provider state read | A new text/voice request may build and edit a separate preview, but cannot confirm it until recovery completes; cancel clears only that preview and never rolls back the confirmed operation |
+| Frozen confirmed operation recovery | Continues the selected PreparedInvoice/operation ID after authoritative provider state read; with several unfinished operations, presents a user-scoped choice | A distinct basis can be prepared and confirmed independently; the same basis cannot start another operation. Cancel clears only the current preview and never rolls back a confirmed operation |
 | No retained context/recovery | Reports nothing to recover | New request required |
 
-The bot can retain a read-only draft even after a preview; retry is not restricted to mutation recovery. Restart loses unconfirmed conversation state. With the optional durable journal, frozen confirmed operations are restored for reconciliation; this includes linked TaxInvoice work when a capable provider is supplied.
+The bot can retain a read-only draft even after a preview; retry is not restricted to mutation recovery. Restart loses unconfirmed conversation state. With the optional durable journal, all unfinished confirmed operations are restored for reconciliation; this includes linked TaxInvoice work when a capable provider is supplied. A retry of one operation does not clear a separate current preview.
 
 ## 8. PDF and uncertain delivery
 

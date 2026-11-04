@@ -119,6 +119,10 @@ class DeliveredInvoice(StrictModel):
 
 
 def failure_text(exc: WorkflowFailure) -> str:
+    if exc.stage == 'source_deleted':
+        return ("Исходный Invoice в 1С помечен на удаление. Tax Invoice по нему сейчас создавать нельзя. "
+                "Восстановите и проведите этот Invoice в 1С, затем отправьте /retry. "
+                "Новый счёт по тому же основанию автоматически не создаётся, чтобы не получить дубль.")
     if exc.stage.startswith('tax_'):
         return (f'Исходный Invoice {exc.document_id} уже записан. '
                 'Связанный Tax Invoice или его PDF пока не подтверждены. '
@@ -135,9 +139,9 @@ def failure_text(exc: WorkflowFailure) -> str:
         return f"Документ {exc.document_id} создан; проведение не завершено. Отправьте /retry для восстановления."
     if exc.state == "not_started":
         return "1С подтвердила, что операция не началась. /retry сначала проверит её состояние заново."
-    return ("\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u043f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438 \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u0435\u043d: \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u043c\u043e\u0433 \u0431\u044b\u0442\u044c \u0441\u043e\u0437\u0434\u0430\u043d. "
-            "\u041d\u043e\u0432\u0430\u044f \u0437\u0430\u043f\u0438\u0441\u044c \u0438 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435 \u0437\u0430\u0431\u043b\u043e\u043a\u0438\u0440\u043e\u0432\u0430\u043d\u044b \u0434\u043e \u0441\u0432\u0435\u0440\u043a\u0438; \u043d\u043e\u0432\u044b\u0439 preview \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0438\u043b\u0438 \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c. "
-            "/retry \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442 \u0444\u0430\u043a\u0442\u0438\u0447\u0435\u0441\u043a\u043e\u0435 \u0441\u043e\u0441\u0442\u043e\u044f\u043d\u0438\u0435 \u043f\u0440\u0435\u0436\u043d\u0435\u0439 \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u0438.")
+    return ("Результат этой подтверждённой операции неизвестен: документ мог быть создан. "
+            "Повторно создавать счёт по этому основанию нельзя до сверки. "
+            "Другие счета можно подготовить и подтвердить. /retry проверит прежнюю операцию в 1С.")
 
 
 class Bot:
@@ -154,11 +158,53 @@ class Bot:
         self.supplier_reviews: dict[int, Pending] = {}
         self.contexts: dict[int, DraftContext] = {}
         self.last_contexts: dict[int, DraftContext] = {}
-        self.recoveries: dict[int, PreparedInvoice] = (
-            service.journal.recoveries() if service.journal is not None else {})
+        self.recoveries: dict[int, dict[str, PreparedInvoice]] = {
+            user_id: {item.operation_id: item for item in items}
+            for user_id, items in (service.journal.pending_recoveries() if service.journal is not None else {}).items()}
         # The webhook receipt limit also bounds this set within one process.
         self.delivered: dict[DeliveredInvoice, PreparedInvoice] = {}
         self.delivery_attempted: set[DeliveredInvoice] = set()
+
+    def _remember_recovery(self, uid: int, prepared: PreparedInvoice) -> None:
+        self.recoveries.setdefault(uid, {})[prepared.operation_id] = prepared
+
+    def _forget_recovery(self, uid: int, operation_id: str) -> None:
+        items = self.recoveries.get(uid)
+        if items is not None:
+            items.pop(operation_id, None)
+            if not items:
+                self.recoveries.pop(uid, None)
+
+    def _forget_preview_for(self, uid: int, operation_id: str) -> DraftContext | None:
+        pending = self.pending.get(uid)
+        if pending is not None and pending.prepared.operation_id == operation_id:
+            self.pending.pop(uid, None)
+        context = self.contexts.get(uid)
+        if context is not None and context.prepared is not None and context.prepared.operation_id == operation_id:
+            return self.contexts.pop(uid)
+        return None
+
+    def _choose_recovery(self, uid: int, prefix: str) -> PreparedInvoice:
+        matches = [item for key, item in self.recoveries.get(uid, {}).items() if key.startswith(prefix)]
+        if len(matches) != 1:
+            raise UserProblem("Эта операция восстановления уже завершена или выбор неоднозначен. Отправьте /retry.")
+        return matches[0]
+
+    def _retry_choice(self, uid: int) -> PreparedInvoice | ConfirmationPrompt | None:
+        items = self.recoveries.get(uid, {})
+        if len(items) == 1:
+            return next(iter(items.values()))
+        if not items:
+            return None
+        rows = ["Есть несколько незавершённых счетов. Выберите, какой продолжить:"]
+        buttons = []
+        for number, prepared in enumerate(items.values(), 1):
+            label = f"{prepared.preview.recipient.name} — {prepared.preview.invoice_date:%d.%m.%Y}"
+            rows.append(f"{number}. {label}")
+            buttons.append([InlineButton(text=f"Продолжить {number}",
+                callback_data=f"recovery:{prepared.operation_id[:16]}")])
+        return ConfirmationPrompt(text="\n".join(rows),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
     def show_preview(self, uid: int, prepared: PreparedInvoice, command: InvoiceCommand,
                      notice: str = "") -> ConfirmationPrompt:
@@ -236,10 +282,13 @@ class Bot:
                 if readonly else "\nTEST / MOCK: реальные счета в 1С не создаются." if self.service.onec.is_fake is True else "")
         if not readonly and getattr(self.service.onec, 'requires_tax_invoice', False) is True:
             mode += '\nПодтверждение: Invoice → связанный Tax Invoice → штатный Tax Invoice (EN, landscape) PDF.'
-        recovery_notice = ("\n\u041f\u0440\u0435\u0434\u044b\u0434\u0443\u0449\u0430\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u0430\u044f \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f \u0435\u0449\u0451 \u043d\u0435 \u0441\u0432\u0435\u0440\u0435\u043d\u0430 \u0441 1\u0421. \u041d\u043e\u0432\u044b\u0439 preview \u043c\u043e\u0436\u043d\u043e \u043f\u043e\u0434\u0433\u043e\u0442\u043e\u0432\u0438\u0442\u044c \u0438 \u043e\u0442\u043c\u0435\u043d\u0438\u0442\u044c, "
-                           "\u043d\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c \u0435\u0433\u043e \u043c\u043e\u0436\u043d\u043e \u0442\u043e\u043b\u044c\u043a\u043e \u043f\u043e\u0441\u043b\u0435 /retry." if uid in self.recoveries else "")
+        same_recovery = prepared.operation_id in self.recoveries.get(uid, {})
+        recovery_notice = ("\nДля этого основания уже есть подтверждённая операция. Новый документ не создаём; "
+                           "отправьте /retry для её сверки и продолжения." if same_recovery else
+                           "\nУ вас есть другая незавершённая операция. Её можно продолжить позже командой /retry."
+                           if uid in self.recoveries else "")
         buttons = []
-        if uid not in self.recoveries:
+        if not same_recovery:
             buttons.append(InlineButton(
                 text="\u041f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c preview" if readonly else "\u0421\u043e\u0437\u0434\u0430\u0442\u044c \u0447\u0435\u0440\u043d\u043e\u0432\u0438\u043a \u0432 1\u0421"
                     if getattr(self.service.onec, "posting_enabled", True) is False else "\u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0434\u0438\u0442\u044c",
@@ -407,8 +456,8 @@ class Bot:
         return self.show_client_choices(uid, None, choices, draft=draft)
 
     async def confirm(self, uid: int, pending: Pending, request_id: str):
-        if uid in self.recoveries:
-            raise UserProblem("Сначала восстановите операцию командой /retry.")
+        if pending.prepared.operation_id in self.recoveries.get(uid, {}):
+            raise UserProblem("Для этого основания уже есть подтверждённый счёт. Отправьте /retry для его сверки и продолжения.")
         try:
             refreshed = await self.service.refresh(pending.prepared, request_id, uid)
         except UserProblem:
@@ -419,7 +468,7 @@ class Bot:
                 self.pending.pop(uid, None)
             elif exc.state == "unknown":
                 self.pending.pop(uid, None)
-                self.recoveries[uid] = pending.prepared
+                self._remember_recovery(uid, pending.prepared)
             raise
         if refreshed != pending.prepared:
             context = self.contexts[uid]
@@ -434,6 +483,11 @@ class Bot:
         return pending.prepared
 
     async def prepare_callback(self, callback: CallbackQuery, request_id: str):
+        if callback.data.startswith("recovery:"):
+            match = re.fullmatch(r"recovery:([a-f0-9]{16})", callback.data)
+            if match is None:
+                raise UserProblem("Кнопка восстановления недействительна. Отправьте /retry.")
+            return self._choose_recovery(callback.sender.id, match[1])
         if callback.data.startswith("initialqty:"):
             uid = callback.sender.id
             match = re.fullmatch(r"initialqty:([a-f0-9]{32}):(one|edit|cancel)", callback.data)
@@ -557,8 +611,14 @@ class Bot:
             if uid in self.recoveries:
                 return "\u041d\u043e\u0432\u044b\u0439 preview \u043e\u0442\u043c\u0435\u043d\u0451\u043d. \u041f\u0440\u0435\u0436\u043d\u044f\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u0430\u044f \u043e\u043f\u0435\u0440\u0430\u0446\u0438\u044f \u043e\u0441\u0442\u0430\u0451\u0442\u0441\u044f \u043d\u0430 \u0441\u0432\u0435\u0440\u043a\u0435; \u043e\u0442\u043f\u0440\u0430\u0432\u044c\u0442\u0435 /retry \u0434\u043b\u044f \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0438."
             return "\u041e\u0436\u0438\u0434\u0430\u044e\u0449\u0430\u044f \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f \u043a\u043e\u043c\u0430\u043d\u0434\u0430 \u043e\u0442\u043c\u0435\u043d\u0435\u043d\u0430; \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442 \u043d\u0435 \u0441\u043e\u0437\u0434\u0430\u0432\u0430\u043b\u0441\u044f."
-        if not is_voice and text == "/retry":
-            if uid not in self.recoveries:
+        if not is_voice and text.startswith("/retry"):
+            retry = re.fullmatch(r"/retry(?: ([a-f0-9]{16}))?", text)
+            if retry is None:
+                raise UserProblem("Отправьте /retry и выберите операцию из списка.")
+            if retry[1] is not None:
+                return self._choose_recovery(uid, retry[1])
+            selected = self._retry_choice(uid)
+            if selected is None:
                 context = self.contexts.get(uid)
                 if getattr(self.service.onec, "preview_only", False) is True and context is not None:
                     self.pending.pop(uid, None)
@@ -567,7 +627,7 @@ class Bot:
                         return await self.search_company(uid, context.draft, request_id)
                     return await self.prepare_command(uid, context.draft.command(), request_id, context)
                 return "Нет незавершённой операции для восстановления."
-            return self.recoveries[uid]
+            return selected
         if not is_voice and text.startswith("/confirm"):
             match = re.fullmatch(r"/confirm ([a-f0-9]{32})", text)
             pending = self.pending.get(uid)
@@ -842,21 +902,17 @@ class Bot:
                         )
                     else:
                         stage = "invoice"
-                        was_recovery = uid in self.recoveries
-                        had_new_preview = uid in self.pending
                         result = await self.service.execute(receipt.prepared, request_id, uid)
                         if result.pdf is None:
                             if result.invoice.posted:
                                 if journal is not None:
                                     journal.finalized_without_pdf(delivery.operation_id, uid)
-                                self.recoveries.pop(uid, None)
-                                if was_recovery:
-                                    self.pending.pop(uid, None)
-                                    self.contexts.pop(uid, None)
+                                self._forget_recovery(uid, delivery.operation_id)
+                                self._forget_preview_for(uid, delivery.operation_id)
                                 receipt.response_text = (f"Счёт №{result.invoice.number or result.invoice.document_id} проведён в 1С и проверен чтением. "
                                     f"ID: {result.invoice.document_id}. Штатный PDF пока недоступен.")
                             else:
-                                self.recoveries[uid] = receipt.prepared
+                                self._remember_recovery(uid, receipt.prepared)
                                 receipt.response_text = (f"Черновик счёта №{result.invoice.number or result.invoice.document_id} создан в 1С и проверен чтением. "
                                     f"ID: {result.invoice.document_id}. Проведение заблокировано: нужна атомарная проверка в 1С. "
                                     "Повторная операция не создаст новый счёт. /retry проверит этот же документ.")
@@ -874,11 +930,8 @@ class Bot:
                         if journal is not None:
                             journal.delivered(delivery.operation_id, uid)
                         self.delivered[delivery] = receipt.prepared
-                        self.recoveries.pop(uid, None)
-                        if was_recovery:
-                            self.pending.pop(uid, None)
-                            self.contexts.pop(uid, None)
-                        context = self.contexts.pop(uid, None)
+                        self._forget_recovery(uid, delivery.operation_id)
+                        context = self._forget_preview_for(uid, delivery.operation_id)
                         if context is not None:
                             self.last_contexts[uid] = context
                         event(request_id=request_id, user_id=uid, stage=stage, status="success",
@@ -904,15 +957,15 @@ class Bot:
                     receipt.prepared = None
                     receipt.response_text = str(problem)
                 except WorkflowFailure as failure:
-                    self.recoveries[uid] = receipt.prepared
+                    self._remember_recovery(uid, receipt.prepared)
                     receipt.response_text = failure_text(failure)
             else:
                 if receipt.prepared is not None:
-                    self.recoveries[uid] = receipt.prepared
+                    self._remember_recovery(uid, receipt.prepared)
                 receipt.response_text = failure_text(exc)
         except DeliveryFailure:
             if receipt.prepared is not None:
-                self.recoveries[uid] = receipt.prepared
+                self._remember_recovery(uid, receipt.prepared)
             raise
         except ExternalFailure as exc:
             event(request_id=request_id, user_id=uid, stage=stage, status="error", error=exc.code)
