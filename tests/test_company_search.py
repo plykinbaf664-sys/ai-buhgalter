@@ -105,6 +105,78 @@ def test_unrelated_words_legal_forms_and_short_fuzzy_names_do_not_auto_resolve(f
     assert exact_key("SYN—Group") == exact_key("syn group")
 
 
+@pytest.mark.parametrize("query", ["Synthetic Media FZCO", "synthetic  media f.z.c.o.", "Synthetic Media FZCO LLC"])
+def test_exact_inactive_company_is_reported_as_inactive_not_missing(fixture, query):
+    row = fixture.records["Catalog_Companies"][0]
+    row.update(Inactive=True, Description="Synthetic branch", DescriptionFull="Synthetic Media FZCO")
+    fixture.records["Catalog_Companies"].append({**row, "Ref_Key": ref(99),
+        "Inactive": False, "Description": "Synthetic Media Trading FZCO",
+        "DescriptionFull": "Synthetic Media Trading FZCO"})
+    if query.endswith(" LLC"):
+        with pytest.raises(ClientChoiceRequired):
+            resolve(fixture, query)
+    else:
+        with pytest.raises(UserProblem, match="неактив"):
+            resolve(fixture, query)
+    assert all(request.method == "GET" for request in fixture.calls)
+    assert all("Synthetic Media" not in request.url.params.get("$filter", "") for request in fixture.calls)
+
+
+def test_inactive_company_on_later_page_and_live_activation(fixture):
+    row = fixture.records["Catalog_Companies"][0]
+    fixture.records["Catalog_Companies"] = [{**row, "Ref_Key": ref(n),
+        "Description": "Unrelated synthetic " + str(n),
+        "DescriptionFull": "Unrelated synthetic " + str(n)} for n in range(20, 420)]
+    target = {**row, "Ref_Key": ref(500), "Inactive": True,
+        "Description": "Synthetic Media FZCO", "DescriptionFull": "Synthetic Media FZCO"}
+    fixture.records["Catalog_Companies"].append(target)
+    with pytest.raises(UserProblem, match="неактив"):
+        resolve(fixture, "synthetic media fzco")
+    assert any(request.url.params.get("$skip") == "400" and
+               request.url.params.get("$filter", "").endswith("Inactive eq true")
+               for request in fixture.calls)
+    target["Inactive"] = False
+    assert resolve(fixture, "synthetic media fzco").client_id == ref(500)
+
+
+def test_inactive_company_request_gets_precise_bot_response_without_write(fixture, monkeypatch):
+    from app.ai import Extraction
+
+    fixture.records["Catalog_Companies"][0].update(Inactive=True,
+        Description="Synthetic Media FZCO", DescriptionFull="Synthetic Media FZCO")
+    for key, value in fixture.env().items():
+        monkeypatch.setenv(key, value)
+    sent = []
+
+    def telegram(request):
+        assert request.url.path.endswith("sendMessage")
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 1, "chat": {"id": 123}}})
+
+    def ai(request):
+        result = Extraction(action="create_invoice", client="Synthetic Media FZCO", year=2026, month=12)
+        return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
+            "role": "assistant", "status": "completed", "content": [{"type": "output_text",
+            "text": result.model_dump_json()}]}]})
+
+    settings = Settings(token="123:" + "x" * 32, webhook_secret="s" * 32,
+        allowed_users=frozenset({123}), mode="firstbit_readonly", ai_mode="openai",
+        openai_api_key="synthetic", llm_model="fixture")
+    app = create_app(settings, telegram_transport=httpx.MockTransport(telegram),
+        ai_transport=httpx.MockTransport(ai), firstbit_transport=httpx.MockTransport(fixture.respond))
+    with TestClient(app) as client:
+        client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
+        request = "Сформируй счёт для Synthetic Media FZCO за декабрь 2026 года"
+        update = lambda number: {"update_id": number, "message": {"message_id": number,
+            "from": {"id": 123, "is_bot": False}, "chat": {"id": 123, "type": "private"}, "text": request}}
+        assert client.post("/telegram/webhook", json=update(1)).status_code == 200
+        assert "неактив" in sent[-1]["text"] and not app.state.bot.pending
+        fixture.records["Catalog_Companies"][0]["Inactive"] = False
+        assert client.post("/telegram/webhook", json=update(2)).status_code == 200
+        assert "Предварительный счёт" in sent[-1]["text"]
+    assert fixture.calls and all(call.method == "GET" for call in fixture.calls)
+
+
 @pytest.mark.parametrize("text,company", [
     ("Сформируй счет для SYN Group на 1 ноября 2026 года за бухгалтерское обслуживание", "SYN Group"),
     ("Сформируй счёт для Эс Уай Эн Груп на первое ноября 2026", "Эс Уай Эн Груп"),
@@ -134,7 +206,8 @@ def test_name_paging_finds_later_company_and_does_not_select_before_scan_complet
         "Description": "Unrelated synthetic " + str(n), "DescriptionFull": "Unrelated synthetic " + str(n)}
         for n in range(20, 220)] + [{**target, "Ref_Key": ref(300)}]
     assert resolve(fixture, "syn group fzco").client_id == ref(300)
-    pages = [r for r in fixture.calls if "$skip" in r.url.params]
+    pages = [r for r in fixture.calls if "$skip" in r.url.params
+             and r.url.params.get("$filter", "").endswith("Inactive eq false")]
     assert [r.url.params["$skip"] for r in pages] == ["0", "200"]
 
 
@@ -279,7 +352,8 @@ def test_later_page_full_name_and_short_name_are_not_lost(fixture, query):
         assert [c.client_id for c in choice.value.choices.candidates] == [ref(500)]
     else:
         assert resolve(fixture, query).client_id == ref(500)
-    pages = [r for r in fixture.calls if "$skip" in r.url.params]
+    pages = [r for r in fixture.calls if "$skip" in r.url.params
+             and r.url.params.get("$filter", "").endswith("Inactive eq false")]
     assert [r.url.params["$skip"] for r in pages] == ["0", "200", "400"]
     assert all(r.url.params["$orderby"] == "Ref_Key asc" and r.url.params["$top"] == "200" for r in pages)
     assert resolve(fixture, query, ref(500)).client_id == ref(500)
@@ -295,7 +369,8 @@ def test_short_name_ambiguity_across_pages_never_chooses_first_record(fixture):
     with pytest.raises(ClientChoiceRequired) as choice:
         resolve(fixture, "NRP Equipment")
     assert {c.client_id for c in choice.value.choices.candidates} == {ref(1), ref(500)}
-    assert [r.url.params["$skip"] for r in fixture.calls if "$skip" in r.url.params] == ["0", "200", "400"]
+    assert [r.url.params["$skip"] for r in fixture.calls if "$skip" in r.url.params
+            and r.url.params.get("$filter", "").endswith("Inactive eq false")] == ["0", "200", "400"]
 
 
 def test_month_year_language_sdk_to_real_resolver_and_historical_preview(fixture):

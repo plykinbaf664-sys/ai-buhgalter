@@ -97,7 +97,7 @@ def test_company_ambiguity_and_normalization(fixture):
 
 
 def test_company_not_found_is_distinct_from_duplicate_name(fixture):
-    with pytest.raises(UserProblem, match="Не нашёл похожих компаний"):
+    with pytest.raises(UserProblem, match="активной компании"):
         run(fixture, lambda b: b.resolve_client("Missing synthetic client"))
 
 
@@ -252,8 +252,11 @@ def test_literal_injection_is_data(fixture):
     with pytest.raises(UserProblem):
         run(fixture, lambda b: b.resolve_client("x' or true or Description eq 'x&$top=999"))
     request = fixture.calls[-1]
-    # Client text now stays local entirely; only a fixed, bounded names query reaches ERP.
-    assert request.url.params["$filter"] == "DeletionMark eq false and IsFolder eq false and Inactive eq false"
+    # Client text stays local; active and inactive probes both use fixed filters.
+    filters = {call.url.params["$filter"] for call in fixture.calls
+               if call.url.path.endswith("Catalog_Companies")}
+    assert filters == {"DeletionMark eq false and IsFolder eq false and Inactive eq false",
+                       "DeletionMark eq false and IsFolder eq false and Inactive eq true"}
     assert "x'" not in str(request.url) and "999" not in str(request.url)
     assert request.url.params["$top"] == "200" and request.url.params["$skip"] == "0"
     assert set(request.url.params) == {"$format", "$select", "$filter", "$top", "$skip", "$orderby"}

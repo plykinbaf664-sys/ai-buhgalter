@@ -352,6 +352,15 @@ class FirstBit:
                            for name in (r.Description, r.DescriptionFull)))]
         matches = [r for r in candidates if query in aliases or key in (exact_key(r.Description), exact_key(r.DescriptionFull))]
         if not matches:
+            # A fixed, bounded GET can distinguish a disabled company from a
+            # misspelling. Never offer inactive records for invoice selection.
+            inactive_rows = (rows if query in aliases else await self._company_names(inactive=True))
+            if any(r.Inactive and not (r.DeletionMark or r.IsFolder) and
+                   (query in aliases or key in (exact_key(r.Description), exact_key(r.DescriptionFull)))
+                   for r in inactive_rows):
+                raise UserProblem("Компания найдена в FirstBit, но помечена как неактивная (Inactive=true). "
+                    "Новый счёт для неё остановлен. Проверьте статус клиента в 1С; после активации повторите запрос.")
+        if not matches:
             # Rank only locally. Fuzzy/transliterated/partial suggestions always need a button.
             candidates.sort(key=lambda r: (-max(similarity(source_query, r.Description),
                 similarity(source_query, r.DescriptionFull)), normalized(r.Description), str(r.Ref_Key)))
@@ -371,18 +380,19 @@ class FirstBit:
                 client_id=str(r.Ref_Key), display_name=r.Description,
                 full_name=r.DescriptionFull or r.Description, tax_number=r.TRN or None) for r in choices)))
         if not matches:
-            raise UserProblem("Не нашёл похожих компаний. Напишите короткую часть названия или произнесите её ещё раз.")
+            raise UserProblem("Не нашёл подходящей активной компании в FirstBit. Проверьте название и статус клиента в 1С.")
         record = await self._checked_company(matches[0], source_query, alias=query in aliases,
             exact=selected_id is None)
         return ResolvedClient(client_id=str(record.Ref_Key), display_name=record.Description)
 
-    async def _company_names(self):
+    async def _company_names(self, *, inactive: bool = False):
         # Fresh, bounded, name-only discovery: no business dump, cache, files, nextLink or AI.
         # Live GET verified $skip / Ref_Key asc, avoiding unsupported tolower().
         result, seen = [], set()
         for skip in range(0, 5000, 200):
             page = await self._rows("Catalog_Companies", model=CompanyName, top=200, skip=skip,
-                order="Ref_Key asc", filter="DeletionMark eq false and IsFolder eq false and Inactive eq false")
+                order="Ref_Key asc", filter=("DeletionMark eq false and IsFolder eq false and Inactive eq "
+                    + ("true" if inactive else "false")))
             for row in page:
                 if row.Ref_Key in seen:
                     raise BackendFailure("firstbit_name_page_changed")
