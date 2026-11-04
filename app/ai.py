@@ -228,6 +228,9 @@ def _ground_command(command: InvoiceCommand, source: str) -> InvoiceCommand:
     # No name expansion from LLM, and no invented/ambiguous calendar values.
     if command.client not in source:
         raise UserProblem("Не удалось однозначно определить клиента. " + HELP)
+    literal_client = explicit_client_phrase(source)
+    if literal_client is not None and command.client.casefold().startswith(literal_client.casefold()):
+        command = InvoiceCommand.model_validate({**command.model_dump(), "client": literal_client})
     calendar_source = command_guard_text(source)
     years = re.findall(r"\b(?:20\d{2}|2100)\b", calendar_source)
     months = [index + 1 for index, name in enumerate(MONTHS)

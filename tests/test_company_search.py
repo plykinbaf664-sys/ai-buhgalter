@@ -139,7 +139,8 @@ def test_inactive_company_on_later_page_and_live_activation(fixture):
     assert resolve(fixture, "synthetic media fzco").client_id == ref(500)
 
 
-def test_inactive_company_request_gets_precise_bot_response_without_write(fixture, monkeypatch):
+@pytest.mark.parametrize("oversized_span", [False, True])
+def test_inactive_company_request_gets_precise_bot_response_without_write(fixture, monkeypatch, oversized_span):
     from app.ai import Extraction
 
     fixture.records["Catalog_Companies"][0].update(Inactive=True,
@@ -154,7 +155,13 @@ def test_inactive_company_request_gets_precise_bot_response_without_write(fixtur
         return httpx.Response(200, json={"ok": True, "result": {"message_id": 1, "chat": {"id": 123}}})
 
     def ai(request):
-        result = Extraction(action="create_invoice", client="Synthetic Media FZCO", year=2026, month=12)
+        result = (LanguageIntent.model_validate({"action": "create",
+            "client_change": {"first_word": 4, "last_word": 11},
+            "date_change": {"source_span": {"first_word": 8, "last_word": 10},
+                "day": 1, "month": 12, "year": 2026},
+            "period_change": None, "line_changes": (), "tax_change": None,
+            "previous_hint_request": None, "clarification": None}) if oversized_span else
+            Extraction(action="create_invoice", client="Synthetic Media FZCO", year=2026, month=12))
         return httpx.Response(200, json={"status": "completed", "output": [{"type": "message",
             "role": "assistant", "status": "completed", "content": [{"type": "output_text",
             "text": result.model_dump_json()}]}]})
@@ -166,7 +173,8 @@ def test_inactive_company_request_gets_precise_bot_response_without_write(fixtur
         ai_transport=httpx.MockTransport(ai), firstbit_transport=httpx.MockTransport(fixture.respond))
     with TestClient(app) as client:
         client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
-        request = "Сформируй счёт для Synthetic Media FZCO за декабрь 2026 года"
+        request = ("Сформируй счёт для Synthetic Media FZCO за 1 декабря 2026 года" if oversized_span else
+            "Сформируй счёт для Synthetic Media FZCO за декабрь 2026 года")
         update = lambda number: {"update_id": number, "message": {"message_id": number,
             "from": {"id": 123, "is_bot": False}, "chat": {"id": 123, "type": "private"}, "text": request}}
         assert client.post("/telegram/webhook", json=update(1)).status_code == 200
@@ -178,6 +186,7 @@ def test_inactive_company_request_gets_precise_bot_response_without_write(fixtur
 
 
 @pytest.mark.parametrize("text,company", [
+    ("Сформируй счет для Synthetic Media FZCO за 1 декабря 2026 года", "Synthetic Media FZCO"),
     ("Сформируй счет для SYN Group на 1 ноября 2026 года за бухгалтерское обслуживание", "SYN Group"),
     ("Сформируй счёт для Эс Уай Эн Груп на первое ноября 2026", "Эс Уай Эн Груп"),
     ("Выстави счёт для компании Алан Тестов за октябрь 2026", "Алан Тестов"),
@@ -191,6 +200,25 @@ def test_missing_model_client_is_recovered_only_from_verbatim_explicit_phrase(te
         "date_change": None, "period_change": None, "line_changes": [], "tax_change": None,
         "previous_hint_request": None, "clarification": "client"})).to_intent(text)
     assert parsed.client == company and parsed.action == "create" and parsed.clarification is None
+
+
+def test_oversized_model_company_span_does_not_include_trailing_invoice_date():
+    from app.ai import Extraction, ground
+
+    text = "Сформируй счет для Synthetic Media FZCO за 1 декабря 2026 года"
+    value = LanguageIntent.model_validate({"action": "create",
+        "client_change": {"first_word": 4, "last_word": 11},
+        "date_change": {"source_span": {"first_word": 8, "last_word": 10},
+            "day": 1, "month": 12, "year": 2026},
+        "period_change": None, "line_changes": (), "tax_change": None,
+        "previous_hint_request": None, "clarification": None})
+    intent = value.to_intent(text)
+    assert intent.client == "Synthetic Media FZCO"
+    assert intent.invoice_date.day == 1
+    compact_text = "Сформируй счет для Synthetic Media FZCO за декабрь 2026 года"
+    compact = ground(Extraction(action="create_invoice",
+        client="Synthetic Media FZCO за декабрь 2026 года", year=2026, month=12), compact_text)
+    assert compact.client == "Synthetic Media FZCO"
 
 
 @pytest.mark.parametrize("text", ["Поставь дату на 5 ноября", "Цена 1500 для первой строки",

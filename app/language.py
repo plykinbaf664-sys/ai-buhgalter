@@ -120,7 +120,7 @@ def explicit_client_phrase(source: str) -> str | None:
         name = tail[:end + 1]
         return name if 2 < len(name) <= 200 else None
     match = re.search(prefix + r"(?P<name>.+?)"
-        r"(?=\s+(?:на\s+(?:" + calendar + r")|за\s+(?:" + period_or_service
+        r"(?=\s+(?:на\s+(?:" + calendar + r")|за\s+(?:" + calendar + r"|" + period_or_service
         + r")|по\s+(?:последн|предыдущ))|[.!?]?$)", source, re.I)
     if match is None:
         return None
@@ -585,8 +585,14 @@ class LanguageIntent(StrictModel):
                                                 query=query)
                 changes.append(IntentPreviewChange(line_number=change.line_number,
                     tax=request, tax_evidence=evidence, rate_evidence=rate_evidence))
-        client = value.client_change.text(source) if value.client_change else (
-            explicit_client_phrase(source) if value.action in ("create", "edit", "clarify") else None)
+        client = value.client_change.text(source) if value.client_change else None
+        literal_client = explicit_client_phrase(source) if value.action in ("create", "edit", "clarify") else None
+        if client is None:
+            client = literal_client
+        elif literal_client is not None and client.casefold().startswith(literal_client.casefold()):
+            # A model span may include a trailing date or service clause. The
+            # explicit boundary is grounded in the user's message, not a guess.
+            client = literal_client
         recovered = value.client_change is None and client is not None
         initial_services, initial_edits = [], []
         header_tax = None
