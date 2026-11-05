@@ -290,7 +290,8 @@ class FirstBitUI:
                     if (request.method=='POST' and any(part in native for part in ('/forms/','/modules/','/cmi/'))
                             and method not in ('FormPost','FormPostAndClose','ActiveNotifications',
                                                'SessionLockParameters','CanUseSeparatedData',
-                                               'EnablePerformanceMeasurements') and not dispatched):
+                                               'EnablePerformanceMeasurements',
+                                               'GetCustomerOrdersStatuses') and not dispatched):
                         artifact=self.root/('native-post-unrecognized-'+uuid.uuid4().hex+'.json')
                         artifact.write_text(__import__('json').dumps({'kind':kind,'method':method}))
                         artifact.chmod(0o600)

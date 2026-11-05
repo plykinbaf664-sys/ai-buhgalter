@@ -162,10 +162,20 @@ def test_native_post_claims_at_dispatch_and_releases_only_proved_session_rejecti
                 events.append('dispatch')
                 await page.response_handler(Response())
             async def abort(self):events.append('abort')
+        class ReadRequest:
+            method='POST'
+            url='https://synthetic.invalid/e1cib/modules/call'
+            post_data='{"root":{"name":"GetCustomerOrdersStatuses"}}'
+        class ReadRoute:
+            request=ReadRequest()
+            async def continue_(self):events.append('read-preflight')
+            async def abort(self):events.append('abort-read')
         class Control:
             async def wait_for(self,**kwargs):pass
             async def click(self):
                 events.append('click')
+                if method=='FormPost':
+                    await page.handler(ReadRoute())
                 await page.handler(Route())
         class Page:
             def locator(self,selector):return Control()
@@ -184,6 +194,7 @@ def test_native_post_claims_at_dispatch_and_releases_only_proved_session_rejecti
             await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',validate,
                                    before_send=claim,on_rejected=rejected)
             assert events.index('validate')<events.index('open')<events.index('claim')<events.index('dispatch')
+            assert events.index('read-preflight')<events.index('claim')
             assert 'rejected' not in events
         elif method=='FormPost':
             with pytest.raises(BackendFailure):
