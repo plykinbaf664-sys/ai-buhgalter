@@ -170,7 +170,9 @@ class FirstBitUI:
                 raise BackendFailure('firstbit_ui_login_input_mismatch')
             self._login_submitted=True
             await self._page.get_by_role('button',name='Log in',exact=True).click()
-        for _ in range(60):
+        # This publication can take longer than 30 seconds to render the
+        # document after a successful login; keep the original 90-second bound.
+        for _ in range(180):
             if self._login_rejected.is_set():
                 raise BackendFailure('firstbit_ui_login_rejected')
             if await ready.count():
