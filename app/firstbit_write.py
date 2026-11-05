@@ -460,6 +460,12 @@ class FirstBitWrite(FirstBit):
                        if 'OffsetAdvancesDebtsAutomatically' in fields else
                        'Ключ связи строки ConnectionKey в образце не является корректным Int64. Запись заблокирована.'
                        if 'ConnectionKey' in fields else
+                       'В историческом счёте заполнено «Основание документа» (DocumentBasis). '
+                       'Бот не проверяет и не переносит эту связь в новый счёт; без разбора основания в 1С запись заблокирована.'
+                       if 'DocumentBasis' in fields else
+                       'В историческом счёте заполнен или повреждён заказ-основание (GoodsOrder). '
+                       'Бот не проверяет и не переносит эту связь в новый счёт; запись заблокирована.'
+                       if 'GoodsOrder' in fields else
                        'Учётные данные образца не прошли проверку для записи.')
             preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': blocker})
         except ValueError:

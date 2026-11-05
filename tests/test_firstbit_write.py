@@ -648,3 +648,32 @@ def test_unknown_debt_offset_policy_blocks_write_with_precise_safe_reason(tmp_pa
             await backend.aclose()
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('field', ['DocumentBasis', 'GoodsOrder'])
+def test_unmodeled_source_document_link_has_precise_blocker_and_never_writes(tmp_path, field):
+    from app.bot import Bot
+
+    fixture = WriteFixture()
+    fixture.records['Document_InventoryExpense'][0][field] = ref(88)
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            service = InvoiceService(backend, journal=backend.journal, allow_real_writes=True)
+            prepared = await prepare(backend)
+            assert prepared.preview.execution_review is None
+            assert field in prepared.preview.write_blocker
+            assert len(prepared.preview.lines) == 2
+            bot = Bot(service, None, None)
+            prompt = bot.show_preview(123, prepared, InvoiceCommand(
+                client='ООО Синтетика', invoice_date=date(2026, 9, 1)))
+            assert field in prompt.text
+            result = await bot.confirm(123, bot.pending[123], 'synthetic-blocked-confirm')
+            assert field in result
+            assert fixture.posts == 0
+            assert all(request.method == 'GET' for request in fixture.calls)
+        finally:
+            await backend.aclose()
+
+    asyncio.run(scenario())
