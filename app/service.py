@@ -49,10 +49,11 @@ def safe_backend_error(exc: Exception) -> str:
 
 class InvoiceService:
     def __init__(self, onec: OneC, timeout: float = 5, *, allow_real_writes: bool = False,
-                 journal: OperationJournal | None = None):
+                 journal: OperationJournal | None = None, pdf_timeout: float | None = None):
         if type(allow_real_writes) is not bool:
             raise ValueError("Write permission must be explicit boolean")
         self.onec, self.timeout = onec, timeout
+        self.pdf_timeout = timeout if pdf_timeout is None else pdf_timeout
         self.allow_real_writes = allow_real_writes
         self.journal = journal
 
@@ -401,7 +402,7 @@ class InvoiceService:
                 raise InvoiceConflict()
             if pdf is None:
                 stage = 'tax_pdf'
-                pdf = TaxInvoicePdf.model_validate(await asyncio.wait_for(self.onec.get_tax_invoice_pdf(tax), self.timeout))
+                pdf = TaxInvoicePdf.model_validate(await asyncio.wait_for(self.onec.get_tax_invoice_pdf(tax), self.pdf_timeout))
                 # Check exact native form, parent, tax document and version before caching/delivery.
                 InvoiceResult(invoice=source, tax_invoice=tax, pdf=pdf)
                 after_print = await self._read_tax_state(prepared, source)

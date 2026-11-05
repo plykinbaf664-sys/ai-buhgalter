@@ -155,7 +155,11 @@ class FirstBitUI:
         self._page.on('response',native_response)
 
         publication=self.settings.base_url.removesuffix('odata/standard.odata/')
-        await self._page.goto(publication+'#'+link,wait_until='domcontentloaded',timeout=45000)
+        # The platform flag suppresses startup/home-page forms. In this
+        # publication the saved Accounts Receivable home form can crash its
+        # native session before the requested document opens.
+        await self._page.goto(publication+'?DisableHomePageForms#'+link,
+                              wait_until='domcontentloaded',timeout=45000)
         login=self._page.locator('#authWindow_basic_login:visible')
         ready=self._page.locator('[id$="_Number_i0"]:visible')
         await login.or_(ready).first.wait_for(state='visible',timeout=60000)
@@ -170,8 +174,8 @@ class FirstBitUI:
                 raise BackendFailure('firstbit_ui_login_input_mismatch')
             self._login_submitted=True
             await self._page.get_by_role('button',name='Log in',exact=True).click()
-        # This publication can take longer than 30 seconds to render the
-        # document after a successful login; keep the original 90-second bound.
+        # Startup/home-page forms are disabled in the launch URL below. Wait
+        # for the exact document form rather than acting on the shell early.
         for _ in range(180):
             if self._login_rejected.is_set():
                 raise BackendFailure('firstbit_ui_login_rejected')
@@ -184,38 +188,34 @@ class FirstBitUI:
         # Only navigation/read preparation can reconnect. Actual financial
         # clicks below are one-shot and never covered by this retry.
         from playwright.async_api import TimeoutError as BrowserTimeout
-        if self._session_failed and self._context is not None:
-            await self.aclose()
-        try:
-            if (self._context is not None and not self._page.is_closed() and
-                    self._verified_document==(kind,UUID(str(reference)))):
-                current=urlsplit(self._page.url);expected=urlsplit(self.settings.base_url)
-                if (current.scheme,current.netloc)!=(expected.scheme,expected.netloc):
-                    raise BackendFailure('firstbit_ui_untrusted_origin')
-                fields=self._page.locator('[id$="_Number_i0"]:visible')
-                if await fields.count()==1 and await fields.input_value()==number:
-                    await self._wait_commands()
-                    return self._page
-            return await self._open_once(kind,reference,number)
-        except (BrowserTimeout,BackendFailure) as error:
-            if isinstance(error,BackendFailure) and str(error) not in ('firstbit_ui_session_unavailable','firstbit_ui_command_not_ready'):
-                raise
-            await self.aclose()
-            return await self._open_once(kind,reference,number)
+        retryable={'firstbit_ui_session_unavailable','firstbit_ui_command_not_ready',
+                   'firstbit_ui_login_timeout'}
+        for attempt in range(2):
+            if self._session_failed and self._context is not None:
+                await self.aclose()
+            try:
+                if (self._context is not None and not self._page.is_closed() and
+                        self._verified_document==(kind,UUID(str(reference)))):
+                    current=urlsplit(self._page.url);expected=urlsplit(self.settings.base_url)
+                    if (current.scheme,current.netloc)!=(expected.scheme,expected.netloc):
+                        raise BackendFailure('firstbit_ui_untrusted_origin')
+                    fields=self._page.locator('[id$="_Number_i0"]:visible')
+                    if await fields.count()==1 and await fields.input_value()==number:
+                        await self._wait_commands()
+                        return self._page
+                if self._context is not None:
+                    await self.aclose()
+                return await self._open_once(kind,reference,number)
+            except (BrowserTimeout,BackendFailure) as error:
+                if attempt or (isinstance(error,BackendFailure) and str(error) not in retryable):
+                    raise
+                await self.aclose()
 
     async def _open_once(self,kind,reference,number):
         link=document_link(kind,reference)
-        if self._context is None:
-            await self._launch(link)
-        else:
-            await self._page.keyboard.press('Escape')
-            await self._page.get_by_title('Service and settings',exact=True).click()
-            await self._page.get_by_text(re.compile(r'^Go\s+to\s+link\.\.\.$')).click()
-            field=self._page.locator('[id$="_CurrentUrlContent_i0"]:visible')
-            await field.wait_for(state='visible')
-            await field.fill(link)
-            await self._page.locator('[id$="_GotoUrl"]:visible').click()
-            await field.wait_for(state='hidden')
+        if self._context is not None:
+            raise BackendFailure('firstbit_ui_session_unavailable')
+        await self._launch(link)
         fields=self._page.locator('[id$="_Number_i0"]:visible')
         await fields.wait_for(state='visible',timeout=45000)
         current=urlsplit(self._page.url);expected=urlsplit(self.settings.base_url)

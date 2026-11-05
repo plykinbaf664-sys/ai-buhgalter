@@ -227,6 +227,41 @@ def test_native_print_opens_fresh_session_only_after_live_validation():
     asyncio.run(scenario())
 
 
+def test_pre_document_login_timeout_reopens_clean_session_without_write():
+    import asyncio
+    async def scenario():
+        ui=FirstBitUI.__new__(FirstBitUI)
+        ui.settings=type('Settings',(),{'base_url':'https://synthetic.invalid/odata/standard.odata/'})()
+        ui._session_failed=False;ui._context=None;ui._verified_document=None
+        attempts=[];closed=[]
+        async def once(*args):
+            attempts.append('open')
+            if len(attempts)==1:raise BackendFailure('firstbit_ui_login_timeout')
+            return 'verified-form'
+        async def close():
+            closed.append('close');ui._context=None
+        ui._open_once=once;ui.aclose=close
+        assert await ui._open_document('TaxInvoice',UUID(int=1),'SYNTHETIC')=='verified-form'
+        assert attempts==['open','open'] and closed==['close']
+    asyncio.run(scenario())
+
+
+def test_pre_document_reference_mismatch_never_retries():
+    import asyncio
+    async def scenario():
+        ui=FirstBitUI.__new__(FirstBitUI)
+        ui._session_failed=False;ui._context=None;ui._verified_document=None
+        attempts=[]
+        async def once(*args):
+            attempts.append('open')
+            raise BackendFailure('firstbit_ui_reference_mismatch')
+        ui._open_once=once
+        with pytest.raises(BackendFailure,match='firstbit_ui_reference_mismatch'):
+            await ui._open_document('TaxInvoice',UUID(int=1),'SYNTHETIC')
+        assert attempts==['open']
+    asyncio.run(scenario())
+
+
 def test_each_native_session_has_clean_private_profile_and_cleanup_is_owned(tmp_path, monkeypatch):
     import asyncio
     import playwright.async_api

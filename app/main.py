@@ -70,7 +70,8 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
         if settings.operation_db is not None else None)
     service = InvoiceService(chosen_backend,
                              timeout=90 if settings.mode == 'firstbit_write' else 45 if settings.mode == "firstbit_readonly" else 5,
-                             allow_real_writes=settings.onec_write_enabled, journal=journal)
+                             allow_real_writes=settings.onec_write_enabled, journal=journal,
+                             pdf_timeout=300 if settings.mode == 'firstbit_write' else None)
     # Stage-1 mock only, bounded and never evicted during process lifetime.
     # Refuse overflow rather than silently forgetting deduplication records.
     receipts: dict[int, Receipt] = {}
