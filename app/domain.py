@@ -273,7 +273,7 @@ class AccountingReference(StrictModel):
 
 class ExecutionReview(StrictModel):
     # Adapter-produced proposal; never accepted from language/intent models.
-    policy: Literal["confirmed_historical_carryover_v1"]
+    policy: Literal["confirmed_historical_carryover_v1", "standalone_invoice_from_historical_v2"]
     schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     payload_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")

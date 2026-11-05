@@ -651,7 +651,7 @@ def test_unknown_debt_offset_policy_blocks_write_with_precise_safe_reason(tmp_pa
 
 
 @pytest.mark.parametrize('field', ['DocumentBasis', 'GoodsOrder'])
-def test_unmodeled_source_document_link_has_precise_blocker_and_never_writes(tmp_path, field):
+def test_new_standalone_invoice_omits_historical_source_links_with_review_and_readback(tmp_path, field):
     from app.bot import Bot
 
     fixture = WriteFixture()
@@ -662,17 +662,43 @@ def test_unmodeled_source_document_link_has_precise_blocker_and_never_writes(tmp
         try:
             service = InvoiceService(backend, journal=backend.journal, allow_real_writes=True)
             prepared = await prepare(backend)
-            assert prepared.preview.execution_review is None
-            assert field in prepared.preview.write_blocker
+            assert prepared.preview.write_blocker is None
+            assert prepared.preview.execution_review.policy == 'standalone_invoice_from_historical_v2'
+            assert any(ref.role == 'source:' + field for ref in prepared.preview.execution_review.references)
             assert len(prepared.preview.lines) == 2
             bot = Bot(service, None, None)
             prompt = bot.show_preview(123, prepared, InvoiceCommand(
                 client='ООО Синтетика', invoice_date=date(2026, 9, 1)))
-            assert field in prompt.text
-            result = await bot.confirm(123, bot.pending[123], 'synthetic-blocked-confirm')
-            assert field in result
+            assert 'самостоятельным' in prompt.text and 'не переносим' in prompt.text
+            confirmed = await bot.confirm(123, bot.pending[123], 'synthetic-confirm')
+            assert confirmed == prepared
+            result = await service.execute(confirmed, 'synthetic-create', 123)
+            assert not result.invoice.posted and fixture.posts == 1
+            assert field not in backend._frozen_payload(prepared.basis)
+            assert fixture.created[0][field] == ref(0)
+            assert await service.execute(confirmed, 'synthetic-repeat', 123) == result
+            assert fixture.posts == 1
+            fixture.created[0][field] = ref(99)
+            with pytest.raises(InvoiceConflict):
+                await backend.read_operation(prepared.basis, prepared.operation_id)
+        finally:
+            await backend.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('field', ['DocumentBasis', 'GoodsOrder'])
+def test_malformed_historical_source_link_still_blocks_write(tmp_path, field):
+    fixture = WriteFixture()
+    fixture.records['Document_InventoryExpense'][0][field] = 'synthetic-unverified-link'
+
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            prepared = await prepare(backend)
+            assert prepared.preview.execution_review is None
+            assert field in prepared.preview.write_blocker
             assert fixture.posts == 0
-            assert all(request.method == 'GET' for request in fixture.calls)
         finally:
             await backend.aclose()
 

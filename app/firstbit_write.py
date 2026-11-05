@@ -147,8 +147,10 @@ class WriteDocument(HistoricalInvoice):
     Emirate: str = Field(max_length=100)
     OffsetAdvancesDebtsAutomatically: Literal['Yes', 'No']
     Repetition: int = Field(ge=1, le=1)
-    GoodsOrder: str = Field(pattern=r'^(|00000000-0000-0000-0000-000000000000)$')
-    DocumentBasis: str = Field(pattern=r'^(|00000000-0000-0000-0000-000000000000)$')
+    # Historical source links may be nonempty. They are provenance of that
+    # document; a new standalone Invoice never inherits them.
+    GoodsOrder: str = Field(pattern=r'^(|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
+    DocumentBasis: str = Field(pattern=r'^(|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$')
     Inventory: tuple[WriteLine, ...] = Field(max_length=200)
     PaymentTermsStages: tuple[PaymentStage, ...] = Field(max_length=20)
     InventorySets: tuple[()]
@@ -361,6 +363,14 @@ class FirstBitWrite(FirstBit):
                     'DocumentCurrency_Key', 'AccountingCurrency_Key', 'NationalCurrency_Key')):
                 raise UserProblem('Учётные реквизиты источников различаются. Запись заблокирована.')
             evidence.append(source.model_dump_json())
+        # An invoice requested from historical prices is a new standalone
+        # accounting document. Source-document links belong to the old document
+        # and are deliberately omitted, disclosed and bound into the review.
+        source_links = tuple(field for field in ('DocumentBasis', 'GoodsOrder')
+            if any(getattr(source, field) not in ('', str(ZERO)) for source in sources.values()))
+        for field in source_links:
+            references.append(AccountingReference(role='source:'+field,
+                reference_id='not-transferred', label='Новый самостоятельный Invoice без связи из образца'))
         for key, entity in {**HEADER_REFS, **OPTIONAL_HEADER_REFS}.items():
             value = await reference(key, entity, getattr(primary, key))
             if value is None and key in HEADER_REFS:
@@ -393,7 +403,8 @@ class FirstBitWrite(FirstBit):
             references.append(AccountingReference(role=f'line:{index}:UnitOfMeasure', reference_id=str(row.UnitOfMeasure), label=line.uom))
             uom_types.append(row.UnitOfMeasure_Type)
         try:
-            review = ExecutionReview(policy='confirmed_historical_carryover_v1', schema_sha256=self.schema_sha256,
+            review = ExecutionReview(policy=('standalone_invoice_from_historical_v2' if source_links
+                else 'confirmed_historical_carryover_v1'), schema_sha256=self.schema_sha256,
                 payload_sha256='0' * 64, evidence_sha256=hashlib.sha256(''.join(evidence).encode()).hexdigest(),
                 references=tuple(references), payment_date=preview.invoice_date, price_date=primary.PriceDate,
                 line_uom_types=tuple(uom_types))
@@ -405,7 +416,8 @@ class FirstBitWrite(FirstBit):
     @staticmethod
     def _payload(preview, review, client_id):
         raw_refs = {item.role: item.reference_id for item in review.references}
-        refs = {role: UUID(value) for role,value in raw_refs.items() if not role.startswith('header:') and not role.endswith(':ConnectionKey')}
+        refs = {role: UUID(value) for role,value in raw_refs.items()
+                if not role.startswith(('header:', 'source:')) and not role.endswith(':ConnectionKey')}
         if len(raw_refs) != len(review.references) or len(review.line_uom_types) != len(preview.lines):
             raise InvoiceConflict()
         history = preview.historical_proposal
@@ -548,6 +560,8 @@ class FirstBitWrite(FirstBit):
             compared={key:entry for key,entry in expected.items() if key!='TaxInvoiceIsRequired'}
         if value.DeletionMark:
             raise SourceMarkedForDeletion()
+        if value.DocumentBasis not in ('', str(ZERO)) or value.GoodsOrder not in ('', str(ZERO)):
+            raise InvoiceConflict()
         if value.Comment != marker or _canonical({key: actual[key] for key in compared}) != _canonical(compared):
             raise InvoiceConflict()
         return Invoice(document_id=str(value.Ref_Key), number=value.Number, posted=value.Posted, client_id=basis.client_id,

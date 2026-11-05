@@ -82,6 +82,13 @@ def historical_preview_text(preview: InvoicePreview) -> str:
                      "Поставщик нового документа пока не подтверждён.")
     if preview.execution_review is not None:
         review = preview.execution_review
+        omitted_links = [item.role.split(':')[-1] for item in review.references
+                         if item.role in ('source:DocumentBasis', 'source:GoodsOrder')]
+        if omitted_links:
+            names = {'DocumentBasis': 'основание документа', 'GoodsOrder': 'заказ'}
+            parts.append('В историческом образце есть ' + ' и '.join(names[name] for name in omitted_links)
+                + '. Новый Invoice будет самостоятельным: эти связи не переносим. '
+                  'После создания их отсутствие проверим в 1С.')
         parts.extend(('', 'Учётные реквизиты предлагаются из образца. Непустые ссылки проверены в live 1С.',
             'Это явный перенос для данного черновика; актуальный тариф или defaults не утверждаются.',
             f'Оплата: 100% в дату счёта {review.payment_date:%d.%m.%Y}. Дата цен образца: {review.price_date:%d.%m.%Y}.'))
