@@ -233,6 +233,30 @@ def test_lost_uncommitted_post_is_not_blindly_repeated(tmp_path):
     assert backend.calls == 1 and len(backend.documents) == 1
 
 
+def test_only_unsent_or_proved_session_rejected_post_can_resume_same_draft(tmp_path):
+    backend=FakeOneC()
+    value=prepared(backend)
+    store=journal(tmp_path/'state/operations.sqlite')
+    store.reserve(value,123)
+    store.claim_mutation(value.operation_id,'create')
+    invoice=asyncio.run(backend.ensure_draft(value.basis,value.operation_id))
+    store.observe(value.operation_id,invoice)
+    store.claim_mutation(value.operation_id,'post')
+    with pytest.raises(MutationUncertain):
+        store.claim_mutation(value.operation_id,'post')
+    store.claim_mutation(value.operation_id,'post',allow_unsubmitted=True)
+    store.claim_provider_request(value.operation_id,'post')
+    with pytest.raises(MutationUncertain):
+        store.claim_mutation(value.operation_id,'post',allow_unsubmitted=True)
+    store.reject_native_post_before_application(value.operation_id,'post')
+    reopened=journal(store.path)
+    reopened.claim_mutation(value.operation_id,'post',allow_unsubmitted=True)
+    reopened.claim_provider_request(value.operation_id,'post')
+    with pytest.raises(MutationUncertain):
+        reopened.claim_provider_request(value.operation_id,'post')
+    assert reopened.get(value.operation_id).invoice==invoice
+
+
 def test_unknown_after_committed_create_requires_later_readback_not_second_create(tmp_path):
     class Uncertain(FakeOneC):
         creates = 0

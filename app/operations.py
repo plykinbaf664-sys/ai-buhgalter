@@ -247,12 +247,21 @@ class OperationJournal:
                        (prepared.operation_id, user_id))
             return self._load(db, prepared.operation_id)
 
-    def claim_mutation(self, operation_id: str, stage: Literal["create", "post"]) -> None:
+    def claim_mutation(self, operation_id: str, stage: Literal["create", "post"],
+                       *, allow_unsubmitted: bool = False) -> None:
         if stage not in ("create", "post"):
             raise ValueError("Invalid mutation stage")
+        if type(allow_unsubmitted) is not bool:
+            raise ValueError("Explicit dispatch capability required")
         with self._connection() as db:
             stored = self._load(db, operation_id)
             expected = "reserved" if stage == "create" else "draft"
+            if (stage == "post" and allow_unsubmitted and stored is not None
+                    and stored.phase == "post_started" and stored.invoice is not None
+                    and not stored.invoice.posted
+                    and db.execute("SELECT 1 FROM provider_requests WHERE operation_id=? AND stage='post'",
+                                   (operation_id,)).fetchone() is None):
+                return  # No native Post request was dispatched; keep the original intent.
             if stored is None or stored.phase != expected:
                 raise MutationUncertain()
             db.execute("UPDATE operations SET phase=? WHERE operation_id=?",
@@ -293,6 +302,30 @@ class OperationJournal:
             cursor = db.execute("INSERT OR IGNORE INTO provider_requests VALUES (?,?)", (operation_id, stage))
             if cursor.rowcount != 1:
                 raise MutationUncertain()
+
+    def reject_native_post_before_application(self, operation_id: str,
+                                              stage: Literal['post', 'post_tax']) -> None:
+        """Release only a native request explicitly rejected by the 1C session layer.
+
+        The caller must have checked the platform's pre-application session
+        exception. The original mutation intent and a rejection marker remain.
+        """
+        if stage not in ('post', 'post_tax'):
+            raise ValueError('Only native posting can be released')
+        with self._connection() as db:
+            stored = self._load(db, operation_id)
+            valid = (stored is not None and stored.phase == 'post_started' and stored.invoice is not None
+                     and not stored.invoice.posted) if stage == 'post' else (
+                         stored is not None and stored.tax is not None and stored.tax.phase == 'post_started'
+                         and stored.tax.invoice is not None and not stored.tax.invoice.posted)
+            if not valid:
+                raise MutationUncertain()
+            deleted = db.execute('DELETE FROM provider_requests WHERE operation_id=? AND stage=?',
+                                 (operation_id, stage))
+            if deleted.rowcount != 1:
+                raise MutationUncertain()
+            db.execute('INSERT OR IGNORE INTO provider_requests VALUES (?,?)',
+                       (operation_id, stage + '_session_rejected'))
 
     @staticmethod
     def _tax_generation_unsubmitted(db, stored) -> bool:
@@ -361,9 +394,17 @@ class OperationJournal:
                 db.execute('UPDATE tax_operations SET phase=?,returned_document_id=?,tax_document_id=?,invoice=? WHERE operation_id=?',
                     (phase, invoice.document_id, invoice.document_id, invoice.model_dump_json(), operation_id))
 
-    def claim_tax_post(self, operation_id: str) -> None:
+    def claim_tax_post(self, operation_id: str, *, allow_unsubmitted: bool = False) -> None:
+        if type(allow_unsubmitted) is not bool:
+            raise ValueError('Explicit dispatch capability required')
         with self._connection() as db:
             stored = self._load(db, operation_id)
+            if (allow_unsubmitted and stored is not None and stored.tax is not None
+                    and stored.tax.phase == 'post_started' and stored.tax.invoice is not None
+                    and not stored.tax.invoice.posted
+                    and db.execute("SELECT 1 FROM provider_requests WHERE operation_id=? AND stage='post_tax'",
+                                   (operation_id,)).fetchone() is None):
+                return
             if stored is None or stored.tax is None or stored.tax.phase != 'draft':
                 raise MutationUncertain()
             db.execute("UPDATE tax_operations SET phase='post_started' WHERE operation_id=?", (operation_id,))

@@ -375,7 +375,8 @@ class InvoiceService:
             if not tax.posted:
                 stage = 'tax_post'
                 self._write_guard()
-                self.journal.claim_tax_post(operation_id)
+                self.journal.claim_tax_post(operation_id, allow_unsubmitted=(
+                    getattr(self.onec, 'posting_send_claimed_at_dispatch', False) is True))
                 event(request_id=request_id, user_id=user_id, stage=stage, status='started',
                       operation_id=operation_id, document_id=tax.document_id)
                 reference = TaxInvoiceReference.model_validate(await asyncio.wait_for(
@@ -485,7 +486,8 @@ class InvoiceService:
                 stage = "post"
                 self._write_guard()
                 if self.journal is not None:
-                    self.journal.claim_mutation(operation_id, "post")
+                    self.journal.claim_mutation(operation_id, "post", allow_unsubmitted=(
+                        getattr(self.onec, 'posting_send_claimed_at_dispatch', False) is True))
                 event(request_id=request_id, user_id=user_id, stage=stage, status="started",
                       operation_id=operation_id, document_id=document_id)
                 posted = self._check_invoice(await asyncio.wait_for(

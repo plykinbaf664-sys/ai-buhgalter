@@ -5,7 +5,7 @@ from uuid import UUID
 import httpx
 import pytest
 
-from app.domain import WorkflowFailure
+from app.domain import BackendFailure, WorkflowFailure
 from app.firstbit import FirstBitSettings
 from app.firstbit_production import FirstBitProduction, full_execution_schema
 from app.operations import OperationJournal
@@ -26,8 +26,12 @@ class SyntheticNativeUI:
         if self.fault=='warm':
             self.fault=None
             raise TimeoutError('Synthetic pre-action login failure')
-    async def post_document(self,kind,reference,number,before_action):
+    async def post_document(self,kind,reference,number,before_action,*,before_send,on_rejected=None):
         await before_action()
+        if self.fault==('tax_post_navigation' if kind=='TaxInvoice' else 'post_navigation'):
+            self.fault=None
+            raise BackendFailure('firstbit_ui_login_rejected')
+        await before_send()
         if kind=='InventoryExpense':
             self.posts+=1;document=self.fixture.created[0]
         else:
@@ -97,6 +101,35 @@ def test_real_adapter_lost_native_response_never_repeats_a_mutation(tmp_path,fau
                 with pytest.raises(WorkflowFailure):await service.execute(prepared,'unknown-reconcile',123)
             assert fixture.posts==1 and ui.posts==1 and ui.generates<=1 and ui.tax_posts<=1
         finally:await provider.aclose()
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('fault,auto_posted,stage', [
+    ('post_navigation', True, 'post'),
+    ('tax_post_navigation', False, 'post_tax'),
+])
+def test_unsent_native_post_survives_restart_and_completes_same_documents(tmp_path,fault,auto_posted,stage):
+    import sqlite3
+    fixture=TaxFixture();ui=SyntheticNativeUI(fixture,auto_posted=auto_posted)
+    path=tmp_path/'private/operations.sqlite'
+    async def scenario():
+        provider=backend(fixture,path,ui);prepared=await prepare(provider);ui.prepared=prepared
+        ui.fault=fault
+        with pytest.raises(WorkflowFailure):
+            await InvoiceService(provider,journal=provider.journal,allow_real_writes=True).execute(prepared,'confirm',123)
+        with sqlite3.connect(path) as db:
+            assert db.execute('SELECT COUNT(*) FROM provider_requests WHERE operation_id=? AND stage=?',
+                              (prepared.operation_id,stage)).fetchone()[0]==0
+        assert provider.journal.get(prepared.operation_id).invoice is not None
+        await provider.aclose()
+        provider=backend(fixture,path,ui)
+        try:
+            result=await InvoiceService(provider,journal=provider.journal,allow_real_writes=True).execute(prepared,'retry',123)
+            assert result.invoice.posted and result.tax_invoice.posted and result.pdf
+            assert fixture.posts==1 and ui.posts==1 and ui.generates==1
+            assert ui.tax_posts==(0 if auto_posted else 1)
+        finally:
+            await provider.aclose()
     asyncio.run(scenario())
 
 

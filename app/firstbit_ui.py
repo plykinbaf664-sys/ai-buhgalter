@@ -83,10 +83,13 @@ class FirstBitUI:
         self._generate_preflight_failed=False
         self._generate_dispatch_error=None
         self._generate_event=asyncio.Event()
+        self._login_rejected=asyncio.Event()
 
     async def _launch(self,link):
         self._busy_commands.clear()
         self._session_failed=False
+        self._login_submitted=False
+        self._login_rejected.clear()
         from playwright.async_api import async_playwright
         self._pw=await async_playwright().start()
         import tempfile
@@ -126,6 +129,8 @@ class FirstBitUI:
                     self._generate_event.set()
             if path.endswith('/login'):
                 self._trace.append({'at':round(time.monotonic(),3),'status':response.status,'resource':'login','submitted':self._login_submitted})
+                if self._login_submitted and response.status>=400:
+                    self._login_rejected.set()
             if self._capture_native_print and response.request.method=='POST' and any(part in path for part in ('/forms/','/modules/')):
                 try:
                     payload=await response.body()
@@ -157,16 +162,21 @@ class FirstBitUI:
         if await login.count():
             if urlsplit(self._page.url).netloc!=urlsplit(self.settings.base_url).netloc:
                 raise BackendFailure('firstbit_ui_untrusted_origin')
-            await login.click()
-            await login.press('Control+a')
-            await login.press_sequentially(self.settings.username.get_secret_value(),delay=15)
+            await login.fill(self.settings.username.get_secret_value())
             password=self._page.locator('#authWindow_basic_password')
-            await password.click()
-            await password.press('Control+a')
-            await password.press_sequentially(self.settings.password.get_secret_value(),delay=15)
+            await password.fill(self.settings.password.get_secret_value())
+            if (await login.input_value()!=self.settings.username.get_secret_value()
+                    or await password.input_value()!=self.settings.password.get_secret_value()):
+                raise BackendFailure('firstbit_ui_login_input_mismatch')
             self._login_submitted=True
             await self._page.get_by_role('button',name='Log in',exact=True).click()
-        await ready.wait_for(state='visible',timeout=90000)
+        for _ in range(60):
+            if self._login_rejected.is_set():
+                raise BackendFailure('firstbit_ui_login_rejected')
+            if await ready.count():
+                return
+            await self._page.wait_for_timeout(500)
+        raise BackendFailure('firstbit_ui_login_timeout')
 
     async def _open_document(self,kind,reference,number):
         # Only navigation/read preparation can reconnect. Actual financial
@@ -237,17 +247,94 @@ class FirstBitUI:
         await field.wait_for(state='hidden')
         self._verified_document=(kind,UUID(str(reference)))
 
-    async def post_document(self,kind,reference,number,before_action):
-        if not callable(before_action):raise BackendFailure('firstbit_ui_missing_write_guard')
+    async def post_document(self,kind,reference,number,before_action,*,before_send,on_rejected=None):
+        if not callable(before_action) or not callable(before_send):
+            raise BackendFailure('firstbit_ui_missing_write_guard')
         async with self._lock:
-            page=await self._open_document(kind,reference,number)
-            await self._assert_reference(kind,reference)
-            await self._wait_commands()
-            control=page.locator('[id$="_FormPost"]:visible')
-            await control.wait_for(state='visible')
+            # OData checks may invalidate a native web session. Finish them
+            # before opening a fresh one, then claim only at transport dispatch.
+            await self.aclose()
             await before_action()
-            await control.click()
-            await page.wait_for_timeout(500)
+            page=await self._open_document(kind,reference,number)
+            try:
+                await self._assert_reference(kind,reference)
+                await self._wait_commands()
+                control=page.locator('[id$="_FormPost"]:visible')
+                await control.wait_for(state='visible')
+                dispatched=False
+                dispatch_error=None
+                dispatch_event=asyncio.Event()
+                response_event=asyncio.Event()
+                response_status=None
+                response_rejected=False
+
+                async def response_seen(response):
+                    nonlocal response_status,response_rejected
+                    request=response.request
+                    if (request.method=='POST' and
+                            native_method_name(request.post_data or '') in ('FormPost','FormPostAndClose')):
+                        response_status=response.status
+                        if response.status>=400:
+                            response_rejected=native_session_rejected(await response.body())
+                        response_event.set()
+
+                page.on('response',response_seen)
+
+                async def dispatch(route):
+                    nonlocal dispatched,dispatch_error
+                    request=route.request
+                    method=native_method_name(request.post_data or '') if request.method=='POST' else None
+                    native=urlsplit(request.url).path
+                    if (request.method=='POST' and any(part in native for part in ('/forms/','/modules/','/cmi/'))
+                            and method not in ('FormPost','FormPostAndClose','ActiveNotifications',
+                                               'SessionLockParameters','CanUseSeparatedData',
+                                               'EnablePerformanceMeasurements') and not dispatched):
+                        artifact=self.root/('native-post-unrecognized-'+uuid.uuid4().hex+'.json')
+                        artifact.write_text(__import__('json').dumps({'kind':kind,'method':method}))
+                        artifact.chmod(0o600)
+                        dispatch_error=BackendFailure('firstbit_ui_post_unrecognized_command')
+                        dispatch_event.set()
+                        await route.abort()
+                        return
+                    if method not in ('FormPost','FormPostAndClose'):
+                        await route.continue_()
+                        return
+                    if dispatched:
+                        await route.abort()
+                        return
+                    try:
+                        await before_send()
+                        dispatched=True
+                    except Exception as error:
+                        dispatch_error=error
+                        dispatch_event.set()
+                        await route.abort()
+                        return
+                    await route.continue_()
+                    dispatch_event.set()
+
+                await page.route('**/*',dispatch)
+                await control.click()
+                try:
+                    await asyncio.wait_for(dispatch_event.wait(),timeout=25)
+                except asyncio.TimeoutError:
+                    raise BackendFailure('firstbit_ui_post_not_submitted') from None
+                if dispatch_error is not None:
+                    raise dispatch_error
+                if not dispatched:
+                    raise BackendFailure('firstbit_ui_post_not_submitted')
+                try:
+                    await asyncio.wait_for(response_event.wait(),timeout=45)
+                except asyncio.TimeoutError:
+                    raise BackendFailure('firstbit_ui_post_not_acknowledged') from None
+                if response_rejected:
+                    if on_rejected is not None:
+                        await on_rejected()
+                    raise BackendFailure('firstbit_ui_session_unavailable')
+                if response_status != 200:
+                    raise BackendFailure('firstbit_ui_post_not_acknowledged')
+            finally:
+                await self.aclose()
 
     async def generate_tax_invoice(self,reference,number,before_action,*,before_send):
         if not callable(before_action) or not callable(before_send):

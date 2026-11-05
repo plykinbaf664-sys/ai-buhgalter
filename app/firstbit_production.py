@@ -29,6 +29,7 @@ class FirstBitProduction(FirstBitWrite):
     native_pdf_available=True
     requires_tax_invoice=True
     generation_send_claimed_at_dispatch=True
+    posting_send_claimed_at_dispatch=True
 
     def __init__(self,settings,*,journal,schema_sha256,ui,transport=None):
         if ui is None:raise WritesDisabled()
@@ -90,8 +91,6 @@ class FirstBitProduction(FirstBitWrite):
         if state.status=='not_started':
             history=basis.preview.historical_proposal
             await self.ui.warm_document('InventoryExpense',UUID(history.source_id),history.source_number)
-        elif state.status=='draft':
-            await self.ui.warm_document('InventoryExpense',UUID(state.invoice.document_id),state.invoice.number)
         return state
 
     async def ensure_posted(self,basis,invoice,operation_id):
@@ -107,8 +106,18 @@ class FirstBitProduction(FirstBitWrite):
             _,registration=await self._registration(basis.preview)
             if registration.TRNVAT!=basis.preview.issuer.tax_number:raise InvoiceConflict()
             if await self._remote(basis,operation_id)!=current:raise InvoiceConflict()
+        async def before_send():
             self.journal.claim_provider_request(operation_id,'post')
-        await self.ui.post_document('InventoryExpense',UUID(current.document_id),current.number,before_action)
+        async def on_rejected():
+            self.journal.reject_native_post_before_application(operation_id,'post')
+        for attempt in range(2):
+            try:
+                await self.ui.post_document('InventoryExpense',UUID(current.document_id),current.number,
+                                            before_action,before_send=before_send,on_rejected=on_rejected)
+                break
+            except BackendFailure as error:
+                if attempt or str(error)!='firstbit_ui_session_unavailable':
+                    raise
         posted=None
         for attempt in range(12):
             posted=await self._remote(basis,operation_id)
@@ -120,10 +129,6 @@ class FirstBitProduction(FirstBitWrite):
 
     async def read_tax_operation(self,basis,source,operation_id):
         state=await read_tax_operation(self,basis,source,operation_id)
-        if state.status=='not_started':
-            await self.ui.warm_document('InventoryExpense',UUID(source.document_id),source.number)
-        elif state.status=='draft':
-            await self.ui.warm_document('TaxInvoice',UUID(state.invoice.document_id),state.invoice.number)
         return state
 
     async def ensure_tax_invoice(self,basis,source,operation_id):
@@ -165,8 +170,18 @@ class FirstBitProduction(FirstBitWrite):
             await self._schema()
             fresh=await find_tax_record(self,basis,source)
             if fresh!=current:raise InvoiceConflict()
+        async def before_send():
             self.journal.claim_provider_request(operation_id,'post_tax')
-        await self.ui.post_document('TaxInvoice',UUID(invoice.document_id),invoice.number,before_action)
+        async def on_rejected():
+            self.journal.reject_native_post_before_application(operation_id,'post_tax')
+        for attempt in range(2):
+            try:
+                await self.ui.post_document('TaxInvoice',UUID(invoice.document_id),invoice.number,
+                                            before_action,before_send=before_send,on_rejected=on_rejected)
+                break
+            except BackendFailure as error:
+                if attempt or str(error)!='firstbit_ui_session_unavailable':
+                    raise
         posted=None
         for attempt in range(12):
             posted=await find_tax_record(self,basis,source)

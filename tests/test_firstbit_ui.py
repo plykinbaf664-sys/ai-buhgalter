@@ -52,14 +52,14 @@ def test_wrong_live_document_blocks_financial_action_before_provider_claim(actio
         async def opened(*args):return object()
         async def mismatch(*args):raise BackendFailure('firstbit_ui_reference_mismatch')
         async def claim():calls.append('mutation')
+        async def verified():pass
         ui._open_document=opened
         ui._assert_reference=mismatch
+        ui.aclose=verified
         with pytest.raises(BackendFailure):
             if action=='post_document':
-                await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',claim)
+                await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',verified,before_send=claim)
             else:
-                async def verified():pass
-                ui.aclose=verified
                 await ui.generate_tax_invoice(UUID(int=1),'SYNTHETIC',verified,before_send=claim)
         assert calls==[]
     asyncio.run(scenario())
@@ -104,7 +104,7 @@ def test_generation_claim_gates_real_rpc_and_only_unsent_preflight_can_reconnect
         async def opened(*args):events.append('open');return page
         async def verified(*args):pass
         async def closed():events.append('close')
-        async def validate():events.append('validate')
+        async def validate(*args):events.append('validate')
         async def claim():events.append('claim')
         ui._open_document=opened;ui._assert_reference=verified;ui._wait_commands=verified;ui.aclose=closed
         if ack==200:
@@ -135,6 +135,70 @@ def test_native_session_rejection_requires_platform_exception_not_provider_text(
     assert not native_session_rejected(b'not JSON')
 
 
+@pytest.mark.parametrize('method,status', [('FormPost',200),('UnexpectedMutation',200),('FormPost',500)])
+def test_native_post_claims_at_dispatch_and_releases_only_proved_session_rejection(method,status,tmp_path):
+    import asyncio
+    import json
+    async def scenario():
+        ui=FirstBitUI.__new__(FirstBitUI)
+        ui._lock=asyncio.Lock()
+        events=[]
+        rejection={'exception':{'descr':'Session error','#inner':
+            '{http://v8.1c.ru/8.2/managed-application/seancecontextexception}SeanceContextException',
+            'inner':{'reason':1,'descr':'Session is not available or has been dropped'}}}
+        class Request:
+            method='POST'
+            url='https://synthetic.invalid/e1cib/forms/call'
+        Request.post_data=json.dumps({'root':{'name':method}})
+        from app.firstbit_ui import native_method_name
+        assert native_method_name(Request.post_data)==method
+        class Response:
+            request=Request()
+            def __init__(self):self.status=status
+            async def body(self):return json.dumps(rejection).encode()
+        class Route:
+            request=Request()
+            async def continue_(self):
+                events.append('dispatch')
+                await page.response_handler(Response())
+            async def abort(self):events.append('abort')
+        class Control:
+            async def wait_for(self,**kwargs):pass
+            async def click(self):
+                events.append('click')
+                await page.handler(Route())
+        class Page:
+            def locator(self,selector):return Control()
+            def on(self,event,handler):self.response_handler=handler
+            async def route(self,pattern,handler):self.handler=handler
+        page=Page()
+        async def close():events.append('close')
+        async def validate(*args):events.append('validate')
+        async def open_doc(*args):events.append('open');return page
+        async def claim():events.append('claim')
+        async def rejected():events.append('rejected')
+        ui.aclose=close;ui._open_document=open_doc;ui._assert_reference=validate
+        ui._wait_commands=validate
+        ui.root=tmp_path
+        if method=='FormPost' and status==200:
+            await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',validate,
+                                   before_send=claim,on_rejected=rejected)
+            assert events.index('validate')<events.index('open')<events.index('claim')<events.index('dispatch')
+            assert 'rejected' not in events
+        elif method=='FormPost':
+            with pytest.raises(BackendFailure):
+                await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',validate,
+                                       before_send=claim,on_rejected=rejected)
+            assert events.count('claim')==1 and events.count('rejected')==1
+        else:
+            with pytest.raises(BackendFailure):
+                await ui.post_document('InventoryExpense',UUID(int=1),'SYNTHETIC',validate,
+                                       before_send=claim,on_rejected=rejected)
+            assert 'claim' not in events and 'dispatch' not in events and 'abort' in events
+        assert events[-1]=='close'
+    asyncio.run(scenario())
+
+
 def test_native_print_opens_fresh_session_only_after_live_validation():
     import asyncio
     class NavigationReached(Exception):pass
@@ -161,6 +225,7 @@ def test_each_native_session_has_clean_private_profile_and_cleanup_is_owned(tmp_
         ui.root=tmp_path/'private';ui.root.mkdir(mode=0o700)
         old=ui.root/'profile';old.mkdir();(old/'unrelated.txt').write_text('synthetic old profile')
         ui._busy_commands=set();ui._context=ui._page=ui._pw=ui._profile_tmp=None
+        ui._login_rejected=asyncio.Event()
         paths=[]
         class Chromium:
             async def launch_persistent_context(self,path,**kwargs):
