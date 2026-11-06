@@ -194,7 +194,7 @@ def test_price_tax_and_description_preserve_id_other_row_and_readonly_confirmati
     assert "Изменено пользователем" in flow["sent"][-1]["text"]
     current = button(flow)
     press(flow, old_button)
-    assert "последнем сообщении" in flow["sent"][-1]["text"]
+    assert flow["sent"][-1]["text"].startswith("Это кнопка прежнего preview.")
     press(flow, current)
     assert "READ-ONLY" in flow["sent"][-1]["text"]
     assert {r.method for r in flow["fixture"].calls} == {"GET"}
@@ -233,7 +233,7 @@ def test_real_reported_multi_line_edit_returns_new_preview_and_invalidates_only_
     current_button = button(flow)
     assert old_button != current_button
     press(flow, old_button)
-    assert "последнем сообщении" in flow["sent"][-1]["text"]
+    assert flow["sent"][-1]["text"].startswith("Это кнопка прежнего preview.")
     press(flow, current_button)
     assert "документ не создавался" in flow["sent"][-1]["text"]
     assert {request.method for request in flow["fixture"].calls} == {"GET"}
@@ -274,7 +274,7 @@ def test_live_wording_applies_multi_item_batch_and_legacy_quantity(flow, legacy_
     assert "Строка 1" not in flow["sent"][-1]["text"]
     assert button(flow) != old_button
     press(flow, old_button)
-    assert "последнем сообщении" in flow["sent"][-1]["text"]
+    assert flow["sent"][-1]["text"].startswith("Это кнопка прежнего preview.")
     assert {request.method for request in flow["fixture"].calls} == {"GET"}
 
 
