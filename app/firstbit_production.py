@@ -143,8 +143,10 @@ class FirstBitProduction(FirstBitWrite):
             if await find_tax_record(self,basis,source) is not None:raise InvoiceConflict()
         async def before_send():
             self.journal.claim_provider_request(operation_id,'generate_tax')
+        async def on_rejected():
+            self.journal.reject_tax_generation_before_application(operation_id)
         await self.ui.generate_tax_invoice(UUID(source.document_id),source.number,before_action,
-                                           before_send=before_send)
+                                           before_send=before_send,on_rejected=on_rejected)
         created=None
         for attempt in range(12):
             created=await find_tax_record(self,basis,source)
