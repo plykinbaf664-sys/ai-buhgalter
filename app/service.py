@@ -9,7 +9,7 @@ from app.domain import (BackendFailure, BillingBasis, ClientCandidate, ClientCan
                         ResolvedInvoiceCommand, ResolvedService, ResolvedServiceSelection, ResolvedPreviewLineOverride,
                         PreviewLineOrigin,
                         ServiceProblem, ServiceChoiceRequired, InitialQuantityRequired, StaleBasis, StrictModel, UserProblem,
-                        SourceMarkedForDeletion,
+                        SourceMarkedForDeletion, ReadbackMismatch,
                         WorkflowFailure, WritesDisabled, TaxInvoice, TaxInvoiceReference, TaxInvoicePdf, TaxOperationState)
 from app.operations import MutationUncertain, OperationJournal
 
@@ -304,6 +304,9 @@ class InvoiceService:
             return refreshed
         except SourceMarkedForDeletion:
             raise UserProblem("Ранее подтверждённый Invoice помечен на удаление в 1С. Новый счёт по тому же основанию не создаём; восстановите исходный документ и отправьте /retry.") from None
+        except ReadbackMismatch:
+            raise UserProblem("Созданный Invoice найден в 1С, но его поля отличаются от подтверждённого preview. "
+                "Автоматически проводить этот документ нельзя; новый счёт можно подготовить отдельно.") from None
         except InvoiceConflict:
             raise UserProblem("На это основание уже создан счёт с другими данными. Изменять его автоматически нельзя. Обратитесь к оператору.") from None
         except (UserProblem, WorkflowFailure):
@@ -523,6 +526,10 @@ class InvoiceService:
             return InvoiceResult(invoice=invoice, pdf=pdf)
         except SourceMarkedForDeletion:
             raise WorkflowFailure('source_deleted', document_id, operation_id, 'unknown') from None
+        except ReadbackMismatch:
+            event(request_id=request_id, user_id=user_id, stage='readback_mismatch', status='blocked',
+                  operation_id=operation_id, document_id=document_id, error='ReadbackMismatch')
+            raise WorkflowFailure('readback_mismatch', document_id, operation_id, 'unknown') from None
         except WorkflowFailure:
             raise
         except MutationUncertain:

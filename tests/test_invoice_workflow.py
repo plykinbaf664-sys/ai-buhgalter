@@ -1,6 +1,7 @@
 """Public webhook workflow. Telegram/STT/LLM are mocked; fake 1C remains real code."""
 import json
 import secrets
+import time
 from collections import deque
 from datetime import date
 from decimal import Decimal
@@ -177,6 +178,31 @@ def test_sequential_short_edits_keep_context_and_rotate_confirmation(workflow):
     assert sum(request.url.path.endswith("sendDocument") for request in workflow[3]) == 1
     pdf = pdf_text(workflow)
     assert "05.10.2026" in pdf and "Legal consultation" in pdf and "Tax consultation" in pdf and "1 600.00" in pdf
+
+
+def test_expired_preview_button_rotates_token_and_can_confirm_current_draft(workflow):
+    send(workflow, TEXT, initial())
+    bot = workflow[0].app.state.bot
+    old = token(workflow)
+    bot.pending[123] = bot.pending[123].model_copy(update={'expires_at': time.monotonic() - 1})
+    assert press(workflow, old, 100).status_code == 200
+    current = token(workflow)
+    assert current != old
+    assert press(workflow, old, 101).status_code == 200
+    assert not workflow[1].documents
+    assert press(workflow, current, 102).status_code == 200
+    assert len(workflow[1].documents) == 1
+
+
+def test_expired_text_confirmation_reopens_current_preview(workflow):
+    send(workflow, TEXT, initial())
+    bot = workflow[0].app.state.bot
+    old = bot.pending[123].token
+    bot.pending[123] = bot.pending[123].model_copy(update={'expires_at': time.monotonic() - 1})
+    send(workflow, '/confirm ' + old, number=2)
+    assert bot.pending[123].token != old
+    assert not workflow[1].documents
+    assert 'Подтверждение прежнего preview истекло' in prompt(workflow)['text']
 
 
 def test_ambiguous_added_service_preserves_other_lines_on_clarification(workflow):

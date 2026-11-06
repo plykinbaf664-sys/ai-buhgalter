@@ -5,6 +5,7 @@ from decimal import Decimal
 from pathlib import Path
 import sqlite3
 import time
+from uuid import uuid4
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -16,7 +17,7 @@ from app.bot import Bot
 from app.main import create_app
 from app.domain import (Invoice, InvoiceConflict, TaxInvoicePdf, TaxPdfProvenance,
                         TaxInvoice, TaxInvoiceReference, TaxOperationState, WorkflowFailure, WritesDisabled,
-                        InvoiceCommand, UserProblem)
+                        InvoiceCommand, UserProblem, OperationState, SourceMarkedForDeletion, ReadbackMismatch)
 from app.fake_onec import FakeOneC
 from app.operations import OperationJournal, MutationUncertain, JournalUnavailable
 from app.parser import parse_command
@@ -415,10 +416,11 @@ def test_telegram_tax_pdf_restart_redelivery_and_unknown_delivery(tmp_path, lose
     assert backend.journal.delivery_status(operation_id, 123) == ('sending' if lose_acknowledgement else 'delivered')
 
 
-def test_deferred_confirmation_recovers_pdf_without_recreating_documents(tmp_path):
+@pytest.mark.parametrize('fault,expected_prints', [('pdf_once', 2), ('generate_after_commit', 1)])
+def test_deferred_confirmation_recovers_pdf_without_recreating_documents(tmp_path, fault, expected_prints):
     path = tmp_path / 'private/operations.sqlite'
     backend = SyntheticTaxProvider(store(path))
-    backend.tax_fault = 'pdf_once'
+    backend.tax_fault = fault
     settings = Settings(token='123:' + 'x' * 32, webhook_secret='s' * 32,
         allowed_users=frozenset({123}), mode='firstbit_write', onec_write_enabled=True,
         operation_db=path, firstbit_write_schema_sha256='a' * 64)
@@ -450,8 +452,82 @@ def test_deferred_confirmation_recovers_pdf_without_recreating_documents(tmp_pat
         assert client.post('/telegram/webhook', json=confirm).status_code == 200
         assert client.post('/telegram/webhook', json=update(3, '/retry')).status_code == 200
     assert backend.creates == backend.generates == 1
-    assert backend.prints == 2
+    assert backend.prints == expected_prints
     assert sent.count('sendDocument') == 1
+
+
+def test_failed_preconfirmation_read_keeps_preview_without_phantom_recovery(tmp_path, monkeypatch):
+    backend = SyntheticTaxProvider(store(tmp_path / 'private/operations.sqlite'))
+    worker = service(backend)
+    bot = Bot(worker, None, None)
+    prepared = asyncio.run(prepare(backend))
+    bot.show_preview(123, prepared, parse_command(TEXT))
+    original = bot.pending[123]
+
+    async def unavailable(*args):
+        raise WorkflowFailure('reconcile', None, prepared.operation_id, 'unknown')
+
+    monkeypatch.setattr(worker, 'refresh', unavailable)
+    with pytest.raises(UserProblem, match='Preview сохранён'):
+        asyncio.run(bot.confirm(123, original, 'unavailable'))
+    assert bot.pending[123] == original
+    assert not bot.recoveries and backend.journal.get(prepared.operation_id) is None
+
+
+def test_new_preview_invalidates_old_confirmed_callback(tmp_path):
+    backend = SyntheticTaxProvider(store(tmp_path / 'private/operations.sqlite'))
+    bot = Bot(service(backend), None, None)
+    old = asyncio.run(prepare(backend))
+    bot.show_preview(123, old, parse_command(TEXT))
+    old_token = bot.pending[123].token
+    bot.confirmed_tokens[old_token] = (123, old)
+    new = old.model_copy(update={'basis': old.basis.model_copy(update={'operation_nonce': uuid4()})})
+    assert new.operation_id != old.operation_id
+    bot.show_preview(123, new, parse_command(TEXT))
+    assert old_token not in bot.confirmed_tokens
+    callback = CallbackQuery.model_validate({'id': 'old-confirm',
+        'from': {'id': 123, 'is_bot': False},
+        'message': {'message_id': 1, 'chat': {'id': 123, 'type': 'private'}},
+        'data': f'invoice:confirm:{old_token}'})
+    result = asyncio.run(bot.prepare_callback(callback, 'stale'))
+    assert 'Актуальный счёт' in result.text
+    assert backend.journal.get(old.operation_id) is None
+
+
+def test_retry_ignores_deleted_old_operation_and_selects_live_one(tmp_path, monkeypatch):
+    backend = SyntheticTaxProvider(store(tmp_path / 'private/operations.sqlite'))
+    worker = service(backend)
+    bot = Bot(worker, None, None)
+    deleted = asyncio.run(prepare(backend))
+    current = deleted.model_copy(update={'basis': deleted.basis.model_copy(update={'operation_nonce': uuid4()})})
+    for prepared in (deleted, current):
+        backend.journal.reserve(prepared, 123)
+        bot._remember_recovery(123, prepared)
+
+    async def read_state(prepared):
+        if prepared.operation_id == deleted.operation_id:
+            raise SourceMarkedForDeletion()
+        return OperationState(operation_id=prepared.operation_id, status='not_started')
+
+    monkeypatch.setattr(worker, '_read_state', read_state)
+    assert asyncio.run(bot._retry_choice(123)) == current
+    assert deleted.operation_id in bot.recoveries[123]
+    with pytest.raises(UserProblem, match='удалён'):
+        asyncio.run(bot._choose_recovery(123, deleted.operation_id[:16]))
+
+
+def test_provider_changed_created_invoice_is_not_retried_as_new_create(tmp_path, monkeypatch):
+    backend = SyntheticTaxProvider(store(tmp_path / 'private/operations.sqlite'))
+    prepared = asyncio.run(prepare(backend))
+
+    async def changed(*args):
+        raise ReadbackMismatch()
+
+    monkeypatch.setattr(backend, 'read_operation', changed)
+    with pytest.raises(WorkflowFailure) as failure:
+        asyncio.run(service(backend).execute(prepared, 'mismatch', 123))
+    assert failure.value.stage == 'readback_mismatch'
+    assert backend.creates == backend.generates == 0
 
 
 def test_restart_resumes_confirmed_pdf_without_repeat_create_or_generate(tmp_path):

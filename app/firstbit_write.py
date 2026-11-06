@@ -17,7 +17,7 @@ from pydantic import ConfigDict, Field, ValidationError, field_validator, model_
 
 from app.domain import (AccountingReference, BackendFailure, BillingBasis, ExecutionReview,
                         ExternalModel, Invoice, InvoiceConflict, InvoicePreview, Label, SourceMarkedForDeletion,
-                        Money, OperationState, UserProblem, WritesDisabled)
+                        Money, OperationState, UserProblem, WritesDisabled, ReadbackMismatch)
 from app.firstbit import FirstBit, HistoricalInvoice, HistoricalLine, Page, Record, ZERO
 from app.firstbit_write_schema import inspect_write_schema
 from app.http import bounded_request, ExternalFailure
@@ -566,9 +566,9 @@ class FirstBitWrite(FirstBit):
         if value.DeletionMark:
             raise SourceMarkedForDeletion()
         if value.DocumentBasis not in ('', str(ZERO)) or value.GoodsOrder not in ('', str(ZERO)):
-            raise InvoiceConflict()
+            raise ReadbackMismatch()
         if value.Comment != marker or _canonical({key: actual[key] for key in compared}) != _canonical(compared):
-            raise InvoiceConflict()
+            raise ReadbackMismatch()
         return Invoice(document_id=str(value.Ref_Key), number=value.Number, posted=value.Posted, client_id=basis.client_id,
             basis_key=basis.key, revision=value.DataVersion, preview_digest=basis.preview.digest)
 

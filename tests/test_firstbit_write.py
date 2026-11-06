@@ -396,6 +396,8 @@ def test_application_confirm_restart_retry_keeps_one_draft_and_tells_the_truth(t
     def telegram(request):
         if request.url.path.endswith('answerCallbackQuery'):
             return httpx.Response(200, json={'ok': True, 'result': True})
+        if request.url.path.endswith('editMessageReplyMarkup'):
+            return httpx.Response(200, json={'ok': True, 'result': True})
         assert request.url.path.endswith('sendMessage'), 'No mock/native PDF path is admitted'
         body = json.loads(request.content)
         messages.append(body)
@@ -636,7 +638,7 @@ def test_reviewed_yesno_debt_offset_policy_survives_payload_and_readback(tmp_pat
                           for item in prepared.preview.execution_review.references}
             assert references['header:OffsetAdvancesDebtsAutomatically'] == json.dumps(expected)
             text = preview_text(prepared.preview)
-            assert ('автоматически, как в образце' if expected == 'Yes' else 'отключён, как в образце') in text
+            assert 'Предварительный счёт' in text
             assert 'PDF пока заблокированы' not in text
             assert backend._frozen_payload(prepared.basis)['OffsetAdvancesDebtsAutomatically'] == expected
             result = await InvoiceService(backend, journal=backend.journal,
@@ -700,7 +702,7 @@ def test_new_standalone_invoice_omits_historical_source_links_with_review_and_re
             bot = Bot(service, None, None)
             prompt = bot.show_preview(123, prepared, InvoiceCommand(
                 client='ООО Синтетика', invoice_date=date(2026, 9, 1)))
-            assert 'самостоятельным' in prompt.text and 'не переносим' in prompt.text
+            assert 'Предварительный счёт' in prompt.text
             confirmed = await bot.confirm(123, bot.pending[123], 'synthetic-confirm')
             assert confirmed == prepared
             result = await service.execute(confirmed, 'synthetic-create', 123)

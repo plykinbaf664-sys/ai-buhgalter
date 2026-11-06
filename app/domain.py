@@ -641,6 +641,10 @@ class SourceMarkedForDeletion(InvoiceConflict):
     """A previously confirmed source document is still present but marked deleted."""
 
 
+class ReadbackMismatch(InvoiceConflict):
+    """A provider document has the operation marker but differs from the confirmed snapshot."""
+
+
 class WritesDisabled(Exception):
     pass
 

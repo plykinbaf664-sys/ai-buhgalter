@@ -118,7 +118,7 @@ def test_distinct_invoice_can_be_confirmed_while_old_operation_waits(tmp_path):
         assert asyncio.run(bot._retry_choice(123)) == second
         bot.service._read_state = original_read
         with pytest.raises(UserProblem):
-            bot._choose_recovery(456, first.operation_id[:16])
+            asyncio.run(bot._choose_recovery(456, first.operation_id[:16]))
         current = prepared_on(backend, date(2026, 11, 1))
         prompt = bot.show_preview(123, current, InvoiceCommand(client="ООО Ромашка", invoice_date=date(2026, 11, 1)))
         assert any(button.callback_data.startswith("invoice:confirm:")
