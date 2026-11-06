@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings
-from app.domain import Invoice, InvoiceCommand, InvoiceConflict, OperationState, UserProblem, WorkflowFailure
+from app.domain import Invoice, InvoiceCommand, InvoiceConflict, OperationState, SourceMarkedForDeletion, UserProblem, WorkflowFailure
 from app.fake_onec import FakeOneC
 from app.main import create_app
 from app.operations import JournalUnavailable, MutationUncertain, OperationJournal
@@ -107,8 +107,16 @@ def test_distinct_invoice_can_be_confirmed_while_old_operation_waits(tmp_path):
     with TestClient(app()) as client:
         client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
         bot = client.app.state.bot
-        waiting = bot._retry_choice(123)
+        waiting = asyncio.run(bot._retry_choice(123))
         assert len(waiting.reply_markup.inline_keyboard) == 2
+        original_read = bot.service._read_state
+        async def with_deleted_old(item):
+            if item.operation_id == first.operation_id:
+                raise SourceMarkedForDeletion()
+            return OperationState(operation_id=item.operation_id, status='not_started')
+        bot.service._read_state = with_deleted_old
+        assert asyncio.run(bot._retry_choice(123)) == second
+        bot.service._read_state = original_read
         with pytest.raises(UserProblem):
             bot._choose_recovery(456, first.operation_id[:16])
         current = prepared_on(backend, date(2026, 11, 1))

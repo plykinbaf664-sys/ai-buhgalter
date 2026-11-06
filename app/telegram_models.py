@@ -123,6 +123,16 @@ class CallbackAnswerRequest(StrictModel):
     callback_query_id: str = Field(min_length=1, max_length=256)
 
 
+class EmptyInlineKeyboard(StrictModel):
+    inline_keyboard: list[list[InlineButton]] = Field(max_length=0)
+
+
+class ClearKeyboardRequest(StrictModel):
+    chat_id: int = Field(gt=0)
+    message_id: int = Field(gt=0)
+    reply_markup: EmptyInlineKeyboard = Field(default_factory=lambda: EmptyInlineKeyboard(inline_keyboard=[]))
+
+
 class CallbackAnswerResponse(SuccessResponse):
     result: Literal[True]
 

@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 from app.ai import CommandInterpreter
 from app.domain import (ClientCandidate, ClientCandidates, ClientChoiceRequired, InvoiceCommand, PreparedInvoice, ResolvedClient,
                         ServiceCandidates, ServiceChoiceRequired,
-                        InitialQuantityRequired,
+                        InitialQuantityRequired, SourceMarkedForDeletion,
                         Label, PreviewLineOrigin, ServiceProblem, ServiceSelection, StrictModel, UserProblem, WorkflowFailure)
 from app.http import ExternalFailure
 from app.service import InvoiceService, event, safe_backend_error
@@ -37,6 +37,7 @@ class Receipt(BaseModel):
     response_text: str | None = None
     response_markup: InlineKeyboardMarkup | None = None
     response_sent: int = 0
+    progress_sent: bool = False
 
 
 class Pending(StrictModel):
@@ -120,13 +121,12 @@ class DeliveredInvoice(StrictModel):
 
 def failure_text(exc: WorkflowFailure) -> str:
     if exc.stage == 'source_deleted':
-        return ("Исходный Invoice в 1С помечен на удаление. Tax Invoice по нему сейчас создавать нельзя. "
-                "Восстановите и проведите этот Invoice в 1С, затем отправьте /retry. "
-                "Новый счёт по тому же основанию автоматически не создаётся, чтобы не получить дубль.")
+        return ("Этот ранее созданный Invoice помечен на удаление в 1С, поэтому его Tax Invoice завершить нельзя. "
+                "Для нового счёта отправьте обычный запрос и подтвердите новый preview. "
+                "Если восстановите прежний Invoice в 1С, его можно продолжить через /retry.")
     if exc.stage.startswith('tax_'):
-        return (f'Исходный Invoice {exc.document_id} уже записан. '
-                'Связанный Tax Invoice или его PDF пока не подтверждены. '
-                '/retry сверит ту же операцию с 1С; повторное создание вслепую запрещено.')
+        return ('Invoice уже создан в 1С. Tax Invoice PDF пока не готов: 1С не подтвердила следующий шаг. '
+                'Отправьте /retry — бот продолжит именно этот счёт.')
     if exc.stage == "resolve":
         return "Не удалось получить данные 1С. Создание документа не запускалось. Повторите чтение командой /retry — наговаривать запрос заново не нужно."
     if exc.stage == "write_disabled":
@@ -134,14 +134,13 @@ def failure_text(exc: WorkflowFailure) -> str:
     if exc.stage == "stale":
         return "Данные 1С изменились. Запись остановлена; нужен разбор оператором. /retry проверит прежнюю операцию без нового поиска компании."
     if exc.state == "posted":
-        return f"Документ {exc.document_id} проведён, но PDF не получен или не доставлен. Отправьте /retry."
+        return "Invoice проведён. PDF пока не доставлен; отправьте /retry, чтобы продолжить этот счёт."
     if exc.state == "draft":
-        return f"Документ {exc.document_id} создан; проведение не завершено. Отправьте /retry для восстановления."
+        return "Invoice создан в 1С. Проведение ещё не подтверждено; /retry продолжит этот счёт."
     if exc.state == "not_started":
         return "1С подтвердила, что операция не началась. /retry сначала проверит её состояние заново."
-    return ("Результат этой подтверждённой операции неизвестен: документ мог быть создан. "
-            "Повторно создавать счёт по этому основанию нельзя до сверки. "
-            "Другие счета можно подготовить и подтвердить. /retry проверит прежнюю операцию в 1С.")
+    return ("1С пока не подтвердила результат. Отправьте /retry: бот проверит этот счёт и продолжит "
+            "его, как только состояние станет известно. Новый запрос можно подготовить отдельно.")
 
 
 class Bot:
@@ -164,6 +163,7 @@ class Bot:
         # The webhook receipt limit also bounds this set within one process.
         self.delivered: dict[DeliveredInvoice, PreparedInvoice] = {}
         self.delivery_attempted: set[DeliveredInvoice] = set()
+        self.confirmed_tokens: dict[str, tuple[int, PreparedInvoice]] = {}
 
     def _remember_recovery(self, uid: int, prepared: PreparedInvoice) -> None:
         self.recoveries.setdefault(uid, {})[prepared.operation_id] = prepared
@@ -190,19 +190,56 @@ class Bot:
             raise UserProblem("Эта операция восстановления уже завершена или выбор неоднозначен. Отправьте /retry.")
         return matches[0]
 
-    def _retry_choice(self, uid: int) -> PreparedInvoice | ConfirmationPrompt | None:
+    async def _retry_choice(self, uid: int) -> PreparedInvoice | ConfirmationPrompt | None:
         items = self.recoveries.get(uid, {})
-        if len(items) == 1:
-            return next(iter(items.values()))
         if not items:
             return None
-        rows = ["Есть несколько незавершённых счетов. Выберите, какой продолжить:"]
+        current = self.contexts.get(uid)
+        if current is not None and current.prepared is not None:
+            selected = items.get(current.prepared.operation_id)
+            if selected is not None:
+                try:
+                    await self.service._read_state(selected)
+                except SourceMarkedForDeletion:
+                    pass
+                except Exception:
+                    return selected  # execute will give the precise live result.
+                else:
+                    return selected
+        rows = ["Есть несколько ранее подтверждённых счетов. Выберите, для какого получить Tax Invoice PDF:"]
         buttons = []
-        for number, prepared in enumerate(items.values(), 1):
+        available = []
+        removed = 0
+        for prepared in items.values():
+            owned = self.service.journal.get_for_user(prepared.operation_id, uid)
+            if owned is None:
+                continue
+            stored, delivery = owned
+            if delivery == 'sending':
+                continue  # Telegram acknowledgement is uncertain; never resend.
+            try:
+                state = await self.service._read_state(prepared)
+            except SourceMarkedForDeletion:
+                removed += 1
+                continue
+            except Exception:
+                state = None
+            available.append((prepared, stored, state))
+        if len(available) == 1:
+            return available[0][0]
+        for number, (prepared, stored, state) in enumerate(available, 1):
+            invoice = stored.invoice
+            status = ('Invoice проведён; завершаю Tax Invoice/PDF' if state is not None and state.status == 'posted'
+                      else 'Invoice создан; проверю проведение' if state is not None and state.status == 'draft'
+                      else 'проверю состояние в 1С')
             label = f"{prepared.preview.recipient.name} — {prepared.preview.invoice_date:%d.%m.%Y}"
-            rows.append(f"{number}. {label}")
-            buttons.append([InlineButton(text=f"Продолжить {number}",
+            rows.append(f"{number}. {label}; " + (f"Invoice №{invoice.number}; " if invoice and invoice.number else "") + status)
+            buttons.append([InlineButton(text=f"Получить PDF: вариант {number}",
                 callback_data=f"recovery:{prepared.operation_id[:16]}")])
+        if not buttons:
+            return ConfirmationPrompt(text=("У старых счетов нет действия для автоматического продолжения. "
+                "Если Invoice удалён в 1С, можно сформировать новый preview и подтвердить новый счёт."
+                if removed else "Доставка прежнего PDF требует проверки чата. Новый счёт можно подготовить отдельно."))
         return ConfirmationPrompt(text="\n".join(rows),
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
 
@@ -361,6 +398,10 @@ class Bot:
                            "отправьте /retry для её сверки и продолжения." if same_recovery else
                            "\nУ вас есть другая незавершённая операция. Её можно продолжить позже командой /retry."
                            if uid in self.recoveries else "")
+        if getattr(self.service.onec, 'requires_tax_invoice', False) is True:
+            # A new v2 preview is independent; unrelated older recoveries are
+            # available through /retry and do not belong in this confirmation.
+            recovery_notice = ""
         buttons = []
         if not same_recovery:
             buttons.append(InlineButton(
@@ -554,6 +595,7 @@ class Bot:
                 reason = pending.prepared.preview.write_blocker or "Учётные реквизиты не подтверждены для записи."
                 return "Счёт не создан. Запись этого счёта заблокирована: " + reason
             return "Preview повторно проверен по данным FirstBit. Режим READ-ONLY: документ не создавался. Можно изменить запрос или отменить."
+        self.confirmed_tokens[pending.token] = (uid, pending.prepared)
         return pending.prepared
 
     async def prepare_callback(self, callback: CallbackQuery, request_id: str):
@@ -599,7 +641,24 @@ class Bot:
         pending = self.pending.get(uid)
         if (pending is None or time.monotonic() > pending.expires_at
                 or not hmac.compare_digest(action.token, pending.token)):
-            raise UserProblem("Эта кнопка относится к предыдущей версии preview. Используйте кнопки в последнем сообщении; запрос повторять не нужно.")
+            remembered = self.confirmed_tokens.get(action.token) if action.action == 'confirm' else None
+            if remembered is not None and remembered[0] == uid:
+                previous = remembered[1]
+                owned = self.service.journal.get_for_user(previous.operation_id, uid) if self.service.journal else None
+                if owned is not None and owned[1] == 'delivered':
+                    return "Готовый Tax Invoice PDF уже отправлен в этот чат."
+                if owned is not None and owned[1] == 'sending':
+                    return "Отправка PDF уже началась. Проверьте чат; повторная отправка может дать два файла."
+                return previous  # Same confirmed operation; reconciliation happens in execute.
+            if pending is not None and uid in self.contexts:
+                buttons = InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineButton(text="Подтвердить" if not self.service.readonly_preview(pending.prepared)
+                        else "Проверить preview", callback_data=f"invoice:confirm:{pending.token}"),
+                    InlineButton(text="Изменить", callback_data=f"invoice:edit:{pending.token}"),
+                    InlineButton(text="Отмена", callback_data=f"invoice:cancel:{pending.token}")]])
+                return ConfirmationPrompt(text="Это кнопка прежнего preview. Актуальный счёт:\n\n"
+                    + preview_text(pending.prepared.preview), reply_markup=buttons)
+            return "Эта кнопка больше не действует. Для незавершённого счёта отправьте /retry; для нового — обычный запрос."
         if action.action == "cancel":
             self.pending.pop(uid)
             self.contexts.pop(uid, None)
@@ -691,7 +750,7 @@ class Bot:
                 raise UserProblem("Отправьте /retry и выберите операцию из списка.")
             if retry[1] is not None:
                 return self._choose_recovery(uid, retry[1])
-            selected = self._retry_choice(uid)
+            selected = await self._retry_choice(uid)
             if selected is None:
                 context = self.contexts.get(uid)
                 if getattr(self.service.onec, "preview_only", False) is True and context is not None:
@@ -976,7 +1035,24 @@ class Bot:
                         )
                     else:
                         stage = "invoice"
-                        result = await self.service.execute(receipt.prepared, request_id, uid)
+                        if (getattr(self.service.onec, 'requires_tax_invoice', False) is True
+                                and not receipt.progress_sent):
+                            receipt.progress_sent = True
+                            try:
+                                await self.telegram.send_text(uid,
+                                    "Подтверждение принято. Проверяю Invoice в 1С и готовлю Tax Invoice PDF. Файл пришлю сюда.")
+                            except DeliveryFailure:
+                                pass  # Progress text never gates accounting or PDF.
+                        try:
+                            result = await self.service.execute(receipt.prepared, request_id, uid)
+                        except WorkflowFailure as first:
+                            if (getattr(self.service.onec, 'requires_tax_invoice', False) is not True
+                                    or first.state not in ('draft', 'posted')
+                                    or first.stage in ('source_deleted', 'stale', 'write_disabled')):
+                                raise
+                            # One bounded GET-first continuation of the same frozen
+                            # operation. Journal claims still prohibit blind writes.
+                            result = await self.service.execute(receipt.prepared, request_id, uid)
                         if result.pdf is None:
                             if result.invoice.posted:
                                 if journal is not None:

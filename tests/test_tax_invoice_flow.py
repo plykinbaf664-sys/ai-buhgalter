@@ -379,6 +379,7 @@ def test_telegram_tax_pdf_restart_redelivery_and_unknown_delivery(tmp_path, lose
         sent.append(method)
         if method == 'sendDocument':
             assert PDF in request.content
+            assert b'filename="Tax Invoice.pdf"' in request.content
             if lose_acknowledgement:
                 raise httpx.ReadTimeout('Synthetic lost delivery acknowledgement', request=request)
         return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}})
@@ -398,6 +399,12 @@ def test_telegram_tax_pdf_restart_redelivery_and_unknown_delivery(tmp_path, lose
         confirm = update(2, '/confirm ' + token)
         assert client.post('/telegram/webhook', json=confirm).status_code == (503 if lose_acknowledgement else 200)
         assert client.post('/telegram/webhook', json=confirm).status_code == 200
+        repeated_button = {'update_id': 20, 'callback_query': {'id': 'repeat-confirm',
+            'from': {'id': 123, 'is_bot': False}, 'message': {'message_id': 1,
+            'chat': {'id': 123, 'type': 'private'}}, 'data': 'invoice:confirm:' + token}}
+        assert client.post('/telegram/webhook', json=repeated_button).status_code == 200
+        assert sent.count('sendDocument') == 1
+        assert sent.count('editMessageReplyMarkup') == 1
     with TestClient(application()) as client:
         client.headers['X-Telegram-Bot-Api-Secret-Token'] = 's' * 32
         assert client.post('/telegram/webhook', json=confirm).status_code == 200
@@ -405,6 +412,28 @@ def test_telegram_tax_pdf_restart_redelivery_and_unknown_delivery(tmp_path, lose
     assert backend.creates == backend.generates == backend.prints == sent.count('sendDocument') == 1
     operation_id = asyncio.run(prepare(backend)).operation_id
     assert backend.journal.delivery_status(operation_id, 123) == ('sending' if lose_acknowledgement else 'delivered')
+
+
+def test_bot_finishes_known_posted_operation_after_lost_generation_response(tmp_path):
+    path = tmp_path / 'private/operations.sqlite'
+    backend = SyntheticTaxProvider(store(path))
+    backend.tax_fault = 'generate_after_commit'
+    settings = Settings(token='123:' + 'x' * 32, webhook_secret='s' * 32,
+        allowed_users=frozenset({123}), mode='firstbit_write', onec_write_enabled=True,
+        operation_db=path, firstbit_write_schema_sha256='a' * 64)
+    sent = []
+    def respond(request):
+        sent.append(request.url.path.rsplit('/', 1)[-1])
+        return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}})
+    with TestClient(create_app(settings, backend=backend, telegram_transport=httpx.MockTransport(respond))) as client:
+        client.headers['X-Telegram-Bot-Api-Secret-Token'] = 's' * 32
+        def update(number, text):
+            return {'update_id': number, 'message': {'message_id': number,
+                'from': {'id': 123, 'is_bot': False}, 'chat': {'id': 123, 'type': 'private'}, 'text': text}}
+        assert client.post('/telegram/webhook', json=update(1, TEXT)).status_code == 200
+        token = client.app.state.bot.pending[123].token
+        assert client.post('/telegram/webhook', json=update(2, '/confirm ' + token)).status_code == 200
+    assert backend.creates == backend.generates == backend.prints == sent.count('sendDocument') == 1
 
 
 def test_tax_generation_claim_is_atomic_across_independent_connections(tmp_path):

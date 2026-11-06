@@ -323,7 +323,7 @@ def test_partial_failure_is_explained_and_new_command_resumes(harness, monkeypat
     assert confirm_latest(client, calls).status_code == 200
     assert calls[0].url.path.endswith("/sendMessage")
     text = json.loads(calls[1].content)["text"]
-    assert {"create": "проведение не завершено", "post": "проведён", "pdf": "PDF не получен"}[stage] in text
+    assert {"create": "Проведение ещё не подтверждено", "post": "проведён", "pdf": "PDF пока не доставлен"}[stage] in text
     assert client.post("/telegram/webhook", json=make_update(2, text="/retry")).status_code == 200
     assert calls[2].url.path.endswith("/sendDocument")
     assert len(backend.documents) == 1

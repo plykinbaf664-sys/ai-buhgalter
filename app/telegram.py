@@ -5,7 +5,7 @@ import httpx
 
 from app.domain import UserProblem
 from app.http import ExternalFailure, bounded_request, disable_wire_logs
-from app.telegram_models import (CallbackAnswerRequest, CallbackAnswerResponse, DocumentRequest,
+from app.telegram_models import (CallbackAnswerRequest, CallbackAnswerResponse, ClearKeyboardRequest, DocumentRequest,
                                  FileRequest, FileResponse, InlineKeyboardMarkup, SendResponse,
                                  TextRequest, Voice)
 from app.voice import AudioFile, MAX_VOICE_BYTES, MAX_VOICE_SECONDS
@@ -61,12 +61,22 @@ class Telegram:
         except (ExternalFailure, ValueError, TypeError, AttributeError, RecursionError):
             return False
 
+    async def clear_buttons(self, chat_id: int, message_id: int) -> bool:
+        # Old inline buttons must not remain actionable after a selection.
+        # Telegram cleanup is best effort and never gates a financial action.
+        try:
+            await self._send('editMessageReplyMarkup', chat_id,
+                json=ClearKeyboardRequest(chat_id=chat_id, message_id=message_id).model_dump())
+            return True
+        except DeliveryFailure:
+            return False
+
     async def send_pdf(self, chat_id: int, pdf: bytes, *, is_mock: bool = True) -> None:
         await self._send(
             "sendDocument", chat_id,
             data=DocumentRequest(chat_id=str(chat_id), caption=("TEST / MOCK: тестовый счёт с вымышленными данными. Не для оплаты."
-                if is_mock else "Счёт из 1С.")).model_dump(),
-            files={"document": ("test-invoice.pdf" if is_mock else "invoice.pdf", pdf, "application/pdf")},
+                if is_mock else "Tax Invoice из 1С.")).model_dump(),
+            files={"document": ("test-invoice.pdf" if is_mock else "Tax Invoice.pdf", pdf, "application/pdf")},
         )
 
     async def download_voice(self, voice: Voice) -> AudioFile:

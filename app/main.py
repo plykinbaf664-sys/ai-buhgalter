@@ -206,6 +206,8 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
             try:
                 if callback is not None and not await request.app.state.bot.telegram.answer_callback(callback.id):
                     event(request_id=request_id, user_id=uid, stage="callback_ack", status="error")
+                if callback is not None and callback.message is not None and settings.mode == 'firstbit_write':
+                    await request.app.state.bot.telegram.clear_buttons(uid, callback.message.message_id)
                 await request.app.state.bot.handle(actor, receipt, request_id)
             except DeliveryFailure:
                 event(request_id=request_id, user_id=uid, stage="delivery", status="error",
