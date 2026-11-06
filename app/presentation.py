@@ -53,66 +53,29 @@ def preview_text(preview: InvoicePreview) -> str:
 def historical_preview_text(preview: InvoicePreview) -> str:
     source = preview.historical_proposal
     parts = ["Предварительный счёт", f"Компания: {preview.recipient.name}",
-             f"Поставщик по образцу: {preview.issuer.name}", f"Дата счёта: {preview.invoice_date:%d.%m.%Y}"]
+             f"Поставщик: {preview.issuer.name}", f"Дата счёта: {preview.invoice_date:%d.%m.%Y}"]
     if preview.service_period:
         parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
     parts.extend((f"Договор: {source.contract_name}",
                   f"Образец: счёт №{source.source_number} от {source.source_date:%d.%m.%Y}"))
-    if preview.price_includes_tax:
-        parts.append("Цены образца включают НДС. Налог выделяется из суммы, а не добавляется сверху.")
-        parts.append("В правке «Цена» указывайте цену без НДС; цену с НДС пересчитаем и покажем в preview.")
-    source_map = {item.source_id: item for item in source.sources}
     for i, line in enumerate(preview.lines, 1):
+        price_mode = "с НДС" if line.price_includes_tax else "без НДС"
+        tax_text = (f"НДС {quantity(line.tax.rate)}%: {money(line.tax_amount)} {preview.currency}"
+                    if line.tax.rate else "Без НДС")
         parts.extend(("", f"Пункт {i}. {line.description}",
-            f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency}" + (" (с НДС)" if line.price_includes_tax else ""),
-            f"Без НДС: {money(line.subtotal)}; НДС {quantity(line.tax.rate)}% ({line.tax.label}): {money(line.tax_amount)}",
-            f"Сумма пункта: {money(line.total)} {preview.currency}"))
-        if len(source_map) > 1 and line.source_id in source_map:
-            origin = source_map[line.source_id]
-            parts.append(f"Образец пункта: №{origin.source_number} от {origin.source_date:%d.%m.%Y}")
+            f"{quantity(line.quantity)} {line.uom} × {money(line.price)} {preview.currency} ({price_mode})",
+            f"{tax_text}; итого: {money(line.total)} {preview.currency}"))
     parts.extend(("", f"Всего без НДС: {money(preview.subtotal)} {preview.currency}",
-                  f"Всего НДС: {money(preview.tax_amount)} {preview.currency}",
+                  f"НДС: {money(preview.tax_amount)} {preview.currency}",
                   f"Итого: {money(preview.total)} {preview.currency}", "",
                   ("Основа — указанный счёт. Ручные изменения отмечены ниже; проверьте значения."
-                   if preview.user_overrides else "Цена и количество взяты из указанного счёта. Проверьте их актуальность.")))
+                   if preview.user_overrides else
+                   "Цена и количество взяты из указанного счёта. Проверьте их актуальность.")))
     if preview.user_overrides:
         parts.append(manual_changes_text(preview))
-    if source.contract_entity_name:
-        parts.append(f"В договоре другая организация: {source.contract_entity_name}. "
-                     "Поставщик нового документа пока не подтверждён.")
-    if preview.execution_review is not None:
-        review = preview.execution_review
-        omitted_links = [item.role.split(':')[-1] for item in review.references
-                         if item.role in ('source:DocumentBasis', 'source:GoodsOrder')]
-        if omitted_links:
-            names = {'DocumentBasis': 'основание документа', 'GoodsOrder': 'заказ'}
-            parts.append('В историческом образце есть ' + ' и '.join(names[name] for name in omitted_links)
-                + '. Новый Invoice будет самостоятельным: эти связи не переносим. '
-                  'После создания их отсутствие проверим в 1С.')
-        parts.extend(('', 'Учётные реквизиты предлагаются из образца. Непустые ссылки проверены в live 1С.',
-            'Это явный перенос для данного черновика; актуальный тариф или defaults не утверждаются.',
-            f'Оплата: 100% в дату счёта {review.payment_date:%d.%m.%Y}. Дата цен образца: {review.price_date:%d.%m.%Y}.'))
-        roles = {'BankAccount_Key': 'Банковский счёт', 'PaymentTerms_Key': 'Условия оплаты',
-            'PaymentTermsVersion_Key': 'Версия условий', 'AccountsReceivableGLAccount_GL_Key': 'Дебиторская задолженность',
-            'AdvancesReceivedGLAccount_GL_Key': 'Полученные авансы', 'GLAccount_GL_Key': 'Учёт услуги',
-            'SalesRevenueGLAccount_GL_Key': 'Выручка', 'OutputVATGLAccount_GL_Key': 'НДС'}
-        for item in review.references:
-            pieces = item.role.split(':')
-            role = pieces[-1]
-            if item.role == 'header:OffsetAdvancesDebtsAutomatically':
-                if item.reference_id == '"Yes"':
-                    parts.append('Зачёт авансов и задолженности: автоматически, как в образце.')
-                elif item.reference_id == '"No"':
-                    parts.append('Автоматический зачёт авансов и задолженности: отключён, как в образце.')
-            if role in roles:
-                prefix = f'Пункт {pieces[1]}, ' if len(pieces) == 3 else ''
-                parts.append(f'{prefix}{roles[role]}: {item.label}')
-        parts.append('Проверьте перенесённые учётные реквизиты перед подтверждением.')
-    else:
-        parts.extend((preview.write_blocker or 'Для записи ещё нужны проверенные реквизиты, условия и дата оказания услуги.',
-                      'Можно изменить запрос текстом/голосом, проверить preview или отменить.'))
+    if preview.execution_review is None and preview.write_blocker:
+        parts.append("Создание пока недоступно: не все обязательные данные подтверждены в 1С.")
     return "\n".join(parts)
-
 
 def manual_changes_text(preview: InvoicePreview) -> str:
     changes = []
