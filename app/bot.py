@@ -125,8 +125,8 @@ def failure_text(exc: WorkflowFailure) -> str:
                 "Для нового счёта отправьте обычный запрос и подтвердите новый preview. "
                 "Если восстановите прежний Invoice в 1С, его можно продолжить через /retry.")
     if exc.stage.startswith('tax_'):
-        return ('Invoice уже создан в 1С. Tax Invoice PDF пока не готов: 1С не подтвердила следующий шаг. '
-                'Отправьте /retry — бот продолжит именно этот счёт.')
+        return ('Invoice уже создан в 1С. Результат Tax Invoice пока не подтверждён. '
+                '/retry проверит этот же счёт; повторно создавать документ вслепую бот не будет.')
     if exc.stage == "resolve":
         return "Не удалось получить данные 1С. Создание документа не запускалось. Повторите чтение командой /retry — наговаривать запрос заново не нужно."
     if exc.stage == "write_disabled":
@@ -391,8 +391,6 @@ class Bot:
                 if readonly and getattr(self.service.onec, "write_capable", False) is True else
                 "\nREAD-ONLY: документ не создан. Запись, проведение и PDF отключены."
                 if readonly else "\nTEST / MOCK: реальные счета в 1С не создаются." if self.service.onec.is_fake is True else "")
-        if not readonly and getattr(self.service.onec, 'requires_tax_invoice', False) is True:
-            mode += '\nПодтверждение: Invoice → связанный Tax Invoice → штатный Tax Invoice (EN, landscape) PDF.'
         same_recovery = prepared.operation_id in self.recoveries.get(uid, {})
         recovery_notice = ("\nДля этого основания уже есть подтверждённая операция. Новый документ не создаём; "
                            "отправьте /retry для её сверки и продолжения." if same_recovery else
