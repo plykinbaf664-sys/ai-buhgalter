@@ -202,84 +202,53 @@ def supplier_conflict(flow):
     fixture.records["Document_InventoryExpense"][0]["Entity_Key"] = ref(20)
 
 
-def test_supplier_mismatch_requires_explicit_review_before_preview(flow, caplog):
+def test_supplier_mismatch_goes_directly_to_reviewable_preview(flow):
     supplier_conflict(flow)
     assert send(flow).status_code == 200
     bot = flow[0].app.state.bot
-    assert not bot.pending and 123 in bot.supplier_reviews
-    assert "Historical synthetic supplier" in flow[2][-1]["text"]
-    assert "Synthetic issuer" in flow[2][-1]["text"]
-    assert "Итого:" not in flow[2][-1]["text"]
-    accept = button(flow)
-    before = len(flow[1].calls)
-    assert press(flow, accept).status_code == 200
-    assert len(flow[1].calls) > before  # A fresh GET validates the reviewed snapshot.
+    assert 123 in bot.pending and not bot.supplier_reviews
     preview = bot.pending[123].prepared.preview
     assert preview.historical_proposal.entity_id == ref(20)
     assert preview.historical_proposal.contract_entity_id == ref(3)
-    assert len(preview.lines) == 2
-    assert "Итого:" in flow[2][-1]["text"]
-    assert "Поставщик нового документа пока не подтверждён" in flow[2][-1]["text"]
-    assert ref(20) not in flow[2][-1]["text"]
-    confirm = button(flow)
-    assert press(flow, confirm, number=3).status_code == 200
-    assert "документ не создавался" in flow[2][-1]["text"]
+    text = flow[2][-1]["text"]
+    assert "Historical synthetic supplier" in text
+    assert "Synthetic issuer" in text
+    assert "Организация договора:" in text
+    assert "Итого:" in text
+    assert "Показать образец" not in text
+    assert "Образец:" not in text
+    assert button(flow).startswith("invoice:confirm:")
+    assert press(flow, button(flow), number=2).status_code == 200
     assert {r.method for r in flow[1].calls} == {"GET"}
-    assert "Historical synthetic supplier" not in caplog.text
 
 
-@pytest.mark.parametrize("invalidate", ["new_message", "cancel_command", "cancel_button", "expired", "other_user", "token"])
-def test_supplier_review_is_user_scoped_revocable_and_expiring(flow, invalidate):
+def test_supplier_change_before_confirmation_stops_old_preview(flow):
     supplier_conflict(flow)
     send(flow)
-    data = button(flow)
-    if invalidate == "expired":
-        bot = flow[0].app.state.bot
-        pending = bot.supplier_reviews[123]
-        bot.supplier_reviews[123] = type(pending)(**{**pending.model_dump(), "expires_at": 0.0})
-    elif invalidate == "token":
-        data = "supplier:" + "0" * 32 + ":accept"
-    elif invalidate == "cancel_button":
-        data = flow[2][-1]["reply_markup"]["inline_keyboard"][0][1]["callback_data"]
-        press(flow, data)
-    elif invalidate != "other_user":
-        send(flow, "/cancel" if invalidate == "cancel_command" else TEXT, number=2)
-    before = len(flow[1].calls)
-    assert press(flow, data, number=3, user=456 if invalidate == "other_user" else 123).status_code == 200
-    assert len(flow[1].calls) == before
-    assert not flow[0].app.state.bot.pending
-
-
-def test_supplier_change_during_review_blocks_old_basis(flow):
-    supplier_conflict(flow)
-    send(flow)
-    data = button(flow)
+    old_button = button(flow)
     flow[1].records["Catalog_Entities"].append({"Ref_Key": ref(21), "DeletionMark": False,
         "Description": "Changed synthetic supplier", "DescriptionFull": "Changed synthetic supplier"})
     flow[1].records["Document_InventoryExpense"][0]["Entity_Key"] = ref(21)
-    assert press(flow, data).status_code == 200
-    bot = flow[0].app.state.bot
-    assert not bot.pending and bot.contexts[123].supplier_review is None
+    assert press(flow, old_button, number=2).status_code == 200
+    assert 123 not in flow[0].app.state.bot.pending
     assert "Основание изменилось" in flow[2][-1]["text"]
-    assert not bot.supplier_reviews
+    assert {r.method for r in flow[1].calls} == {"GET"}
 
 
-def test_financial_change_during_supplier_review_requires_new_review(flow):
+def test_financial_change_before_confirmation_rotates_preview(flow):
     supplier_conflict(flow)
     send(flow)
-    data = button(flow)
+    old_button = button(flow)
     source = flow[1].records["Document_InventoryExpense"][0]
     source["Inventory"][0] = flow[1].line(1, "1", "1500")
     source["DocumentAmount"] = "3675.00"
-    assert press(flow, data).status_code == 200
-    bot = flow[0].app.state.bot
-    assert not bot.pending and bot.contexts[123].supplier_review is None
-    assert button(flow) != data
-    assert press(flow, button(flow), number=3).status_code == 200
-    assert bot.pending[123].prepared.preview.total == Decimal("3675.00")
+    assert press(flow, old_button, number=2).status_code == 200
+    assert button(flow) != old_button
+    assert flow[0].app.state.bot.pending[123].prepared.preview.total == Decimal("3675.00")
+    assert {r.method for r in flow[1].calls} == {"GET"}
 
 
-def test_supplier_review_delivery_retry_does_not_repeat_resolution(flow):
+def test_preview_delivery_retry_reuses_response_without_reresolution(flow):
     supplier_conflict(flow)
     flow[3]["fail_delivery"] = True
     assert send(flow).status_code == 503
@@ -287,10 +256,6 @@ def test_supplier_review_delivery_retry_does_not_repeat_resolution(flow):
     before = len(flow[1].calls)
     assert send(flow).status_code == 200
     assert len(flow[1].calls) == before and button(flow) == data
-    assert press(flow, data).status_code == 200
-    count = len(flow[1].calls)
-    assert press(flow, data, number=3).status_code == 200
-    assert len(flow[1].calls) == count
 
 
 @pytest.mark.parametrize("duplicate", [False, True])

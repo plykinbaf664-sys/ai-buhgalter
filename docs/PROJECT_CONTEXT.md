@@ -18,7 +18,7 @@ Text or voice -> controlled intent -> local typed draft -> company/service resol
 
 Explicit initial amounts/prices/tax are applied as user proposals after a verified historical baseline; omitted fields come from that service's source for the same client/contract. Net line amount is distinct from net unit price. Later edits do not silently reset other fields. The detailed financial policy lives in [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md) and [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md).
 
-Company spelling/case/legal-form variations and fuzzy suggestions use [COMPANY_SEARCH](firstbit/COMPANY_SEARCH.md). A company selection only confirms identity. Service selection, quantity clarification and historical-source supplier review may still be needed. Missing history is a blocker, not permission to borrow another client's parameters.
+Company spelling/case/legal-form variations and fuzzy suggestions use [COMPANY_SEARCH](firstbit/COMPANY_SEARCH.md). A company selection only confirms identity. Service selection or quantity clarification may still be needed when business meaning is ambiguous. Historical source selection is internal; missing history is a blocker, not permission to borrow another client's parameters.
 
 ## Domain and actors
 

@@ -344,12 +344,12 @@ def test_historical_supplier_is_proven_and_mismatch_remains_explicit(fixture):
     assert prepared.preview.historical_proposal.contract_entity_name == "Synthetic issuer"
     from app.presentation import preview_text
     text = preview_text(prepared.preview)
-    assert "Поставщик нового документа пока не подтверждён" in text
+    assert "Организация договора: Synthetic issuer" in text
     assert ref(20) not in text and ref(3) not in text and ref(8) not in text
     assert "3 150.00" in text and len(prepared.preview.lines) == 2
 
 
-def test_deleted_historical_supplier_cannot_be_offered_for_review(fixture):
+def test_deleted_historical_supplier_cannot_enter_preview(fixture):
     fixture.records["Catalog_Entities"][0]["DeletionMark"] = True
     with pytest.raises(UserProblem):
         run(fixture, prepare)
@@ -366,11 +366,14 @@ def test_previous_month_does_not_silently_use_older_basis(fixture):
         run(fixture, lambda b: prepare(b, previous="previous_month"))
 
 
-def test_same_timestamp_basis_is_ambiguous(fixture):
-    fixture.records["Document_InventoryExpense"].append(
+@pytest.mark.parametrize("services", [(), (ServiceSelection(query="Accounting and bookkeeping services"),)])
+def test_same_timestamp_uses_stable_provider_order_for_basis(fixture, services):
+    fixture.records["Document_InventoryExpense"].insert(0,
         {**fixture.records["Document_InventoryExpense"][0], "Ref_Key": ref(99)})
-    with pytest.raises(UserProblem):
-        run(fixture, prepare)
+    first = run(fixture, lambda backend: prepare(backend, services=services))
+    second = run(fixture, lambda backend: prepare(backend, services=services))
+    assert first.preview.historical_proposal.source_id == ref(99)
+    assert second.preview.digest == first.preview.digest
 
 
 def test_admin_identity_rejected_with_valid_url(fixture):

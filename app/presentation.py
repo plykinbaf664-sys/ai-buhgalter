@@ -56,8 +56,9 @@ def historical_preview_text(preview: InvoicePreview) -> str:
              f"Поставщик: {preview.issuer.name}", f"Дата счёта: {preview.invoice_date:%d.%m.%Y}"]
     if preview.service_period:
         parts.append(f"Период услуги: {preview.service_period.month:02d}.{preview.service_period.year}")
-    parts.extend((f"Договор: {source.contract_name}",
-                  f"Образец: счёт №{source.source_number} от {source.source_date:%d.%m.%Y}"))
+    parts.append(f"Договор: {source.contract_name}")
+    if source.contract_entity_id is not None:
+        parts.append(f"Организация договора: {source.contract_entity_name}. Проверьте поставщика выше перед подтверждением.")
     for i, line in enumerate(preview.lines, 1):
         price_mode = "с НДС" if line.price_includes_tax else "без НДС"
         tax_text = (f"НДС {quantity(line.tax.rate)}%: {money(line.tax_amount)} {preview.currency}"

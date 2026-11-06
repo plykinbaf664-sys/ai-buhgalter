@@ -503,13 +503,16 @@ class FirstBit:
             raise UserProblem("Для выбранной компании и договора нет проведённых счетов до указанной даты. "
                               "Историческая цена и состав услуг не подтверждены; preview заблокирован.")
         last = None
+        last_ref = None
         for invoice in rows:
             if (not invoice.Posted or invoice.DeletionMark or invoice.Company_Key != company.Ref_Key
                     or invoice.Contract_Key != contract.Ref_Key or invoice.Date.date() >= cutoff
                     or lower is not None and invoice.Date.date() < lower
-                    or last is not None and invoice.Date > last):
+                    or last is not None and invoice.Date > last
+                    or last is not None and invoice.Date == last and str(invoice.Ref_Key) >= last_ref):
                 raise BackendFailure("firstbit_history_scope")
             last = invoice.Date
+            last_ref = str(invoice.Ref_Key)
         return rows
 
     async def _history(self, company, contract, command, item):
@@ -521,10 +524,9 @@ class FirstBit:
         if not candidates:
             raise UserProblem("В последних 30 проведённых счетах до выбранной даты нет истории услуги «" + item.Description
                 + "». Нужен подтверждённый источник; цену, количество или налог из другой услуги не подставляем.")
-        source = candidates[0]
-        if len([r for r in candidates if r.Date == source.Date]) > 1:
-            raise UserProblem("Нашёл несколько счетов с этой услугой на одно время. Нельзя однозначно выбрать образец.")
-        return source
+        # The GET is ordered by Date desc, Ref_Key desc. Both are provider
+        # fields; Ref_Key gives a stable tie break when 1C timestamps coincide.
+        return candidates[0]
 
     async def _line(self, row, item, *, quantity=None, price_includes_tax=False,
                     vats: dict[UUID, VAT], uoms: dict[tuple[str, UUID], NamedRecord]):
@@ -599,8 +601,6 @@ class FirstBit:
         if not command.services:
             default_history = await self._history_rows(company, contract, command)
             template = default_history[0]
-            if len([source for source in default_history if source.Date == template.Date]) > 1:
-                raise UserProblem("Несколько последних счетов имеют одинаковую дату/время. Уточните исторический образец.")
             has_bookkeeping = any(row.Item_Key == self.settings.bookkeeping_item_id
                 for source in default_history for row in source.Inventory)
             if (any(row.Item_Key != self.settings.bookkeeping_item_id for row in template.Inventory)

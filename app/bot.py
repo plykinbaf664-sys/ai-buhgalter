@@ -364,25 +364,9 @@ class Bot:
                                          supplier_review=supplier_review,
                                          selected_service_ids={i + 1: line.service_id for i, line in enumerate(prepared.preview.lines)},
                                          line_ids=tuple(line_ids), line_origins=line_origins)
-        scope = SupplierReviewScope.from_prepared(prepared)
-        if scope is not None and scope != supplier_review:
-            self.pending.pop(uid, None)
-            pending_review = Pending(token=secrets.token_hex(16), prepared=prepared, expires_at=time.monotonic() + 300)
-            self.supplier_reviews[uid] = pending_review
-            source = prepared.preview.historical_proposal
-            return ConfirmationPrompt(text=notice + (
-                f"Компания: {prepared.preview.recipient.name}\n"
-                f"Нашёл счёт №{source.source_number} от {source.source_date:%d.%m.%Y}.\n\n"
-                f"Поставщик в этом счёте: {prepared.preview.issuer.name}\n"
-                f"В текущем договоре: {source.contract_entity_name}\n\n"
-                "Организации различаются. Показать образец по историческому счёту? "
-                + ("Это не выбирает организацию для записи нового документа."
-                   if self.service.readonly_preview(prepared) else
-                   "В новом счёте будет поставщик из исторического образца. "
-                   "Проверьте его в preview перед окончательным подтверждением.")),
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineButton(text="Показать образец из истории", callback_data=f"supplier:{pending_review.token}:accept"),
-                    InlineButton(text="Отмена", callback_data=f"supplier:{pending_review.token}:cancel")]]))
+        # The historical issuer is shown in the preview itself. Confirming that
+        # exact preview is the user decision; a separate sample-review button
+        # adds no financial evidence and interrupts ordinary invoice requests.
         self.supplier_reviews.pop(uid, None)
         pending = Pending(token=secrets.token_hex(16), prepared=prepared, expires_at=time.monotonic() + 300)
         self.pending[uid] = pending

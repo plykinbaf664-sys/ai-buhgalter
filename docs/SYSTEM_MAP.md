@@ -32,13 +32,13 @@ InvoiceService.prepare
   -> canonical PreparedInvoice
 ```
 
-Possible continuations in Bot: company choice, service choice/refinement, initial-quantity clarification, missing business facts, or supplier review. Tokens are user-scoped/expiring; chosen IDs are locally stored candidates and freshly checked. Choosing identity never confirms amounts/defaults or write permission.
+Possible continuations in Bot: company choice, service choice/refinement, initial-quantity clarification, or missing business facts. Tokens are user-scoped/expiring; chosen IDs are locally stored candidates and freshly checked. Choosing identity never confirms amounts/defaults or write permission.
 
 Actual FirstBit reads: fresh schema -> active company -> validated default/unique active contract -> active Service items -> posted client/contract-scoped history -> tax/UOM/currency/entities -> typed historical proposal. Exact sets/limits: [READONLY_PIPELINE](firstbit/READONLY_PIPELINE.md). Multiple services may use different validated historical sources under the constraints in [INITIAL_REQUESTS](firstbit/INITIAL_REQUESTS.md).
 
-## 4. Supplier review and editing
+## 4. Preview and editing
 
-`Bot.show_preview` stores canonical local DraftContext. If historical issuer differs from current contract issuer, Bot first requires an explicit expiring historical-source review and re-reads the proposal before accepting it. Scope covers client/contract/both entities; changed identity blocks and changed snapshot requires renewed review. This reviews an historical sample, not the supplier of a new real invoice.
+`Bot.show_preview` stores canonical local DraftContext and presents the preview immediately. If historical issuer differs from current contract issuer, both organizations are shown before the ordinary confirmation. Refresh rechecks the live source and rotates the preview when financial values change; changed identity invalidates the old confirmation.
 
 Then Telegram receives the preview and five-minute confirmation/edit/cancel token. Price/amount/VAT/display-name/date/quantity changes reuse the local draft. Monetary edits bind to each original source/LineNumber; changing source identity cannot silently transfer them. Other services/rows are not dropped or merged. New validated preview means a new token. Details: [PREVIEW_REVISIONS](firstbit/PREVIEW_REVISIONS.md).
 
@@ -51,7 +51,7 @@ Then Telegram receives the preview and five-minute confirmation/edit/cancel toke
 
 An admitted real writable proposal refreshes its reviewed basis/schema and authoritative operation state, then executes through the same service/journal. Native capability continues through linked TaxInvoice; the base writer stops at verified draft.
 
-Any changed refreshed snapshot causes a new preview/confirmation. Relevant supplier review is re-evaluated. Failed real refresh revokes confirmation but does not manufacture a financial recovery state. Real `read_operation=unknown` remains truthful and cannot be treated as `not_started`.
+Any changed refreshed snapshot causes a new preview/confirmation. Failed real refresh revokes confirmation but does not manufacture a financial recovery state. Real `read_operation=unknown` remains truthful and cannot be treated as `not_started`.
 
 ## 6. Execution and writable-provider contract
 

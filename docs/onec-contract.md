@@ -49,7 +49,7 @@ Preview включает также `supply_date`, валюту, реквизи�
 
 Это правило текущих цен относится к fake; для FirstBit bookkeeping authoritative `ItemPrices` не доказан. Production read-only возвращает явно маркированное historical proposal: цены, отдельные строки и VAT предыдущего posted invoice проверяются арифметически и требуют проверки человеком. Они не объявляются текущим тарифом. Неподдерживаемая арифметика/неизвестные суммы блокируются. `HistoricalProposal` хранит source/contract/entity provenance внутри preview; `BillingBasis` не расширен. Поля supply date/bank/terms/contacts/amount in words могут быть `None` только в таком неисполняемом proposal: defaults нового документа не угадываются. `InvoiceService.execute()` блокирует historical proposals независимо от write permission. Подробный mapping и ограничения: `firstbit/READONLY_PIPELINE.md`.
 Без явного списка услуг FirstBit использует только проверенную историческую структуру по правилам INITIAL_REQUESTS; произвольные настройки/defaults не угадываются.
-Исторический supplier review и readonly confirmation/retry описаны в [SYSTEM_MAP](SYSTEM_MAP.md). Это UI-проверка proposal, не часть будущего mutation API и не подтверждение new-document defaults.
+Показ исторического источника в preview и confirmation/retry описаны в [SYSTEM_MAP](SYSTEM_MAP.md). Это UI-проверка proposal, не часть mutation API и не подтверждение new-document defaults.
 
 
 При получении штатного PDF адаптер проверяет актуальную идентичность и revision документа
