@@ -278,9 +278,10 @@ class InvoiceService:
                 stage = "refresh"
                 basis = BillingBasis.model_validate(await asyncio.wait_for(
                     self.onec.resolve_basis(prepared.request), self.timeout))
-                refreshed = PreparedInvoice(request=prepared.request, basis=basis, display_name=prepared.display_name)
                 if basis.key != prepared.basis.key:
                     raise UserProblem("Основание изменилось. Подготовьте новый preview.")
+                basis = basis.model_copy(update={'operation_nonce': prepared.basis.operation_nonce})
+                refreshed = PreparedInvoice(request=prepared.request, basis=basis, display_name=prepared.display_name)
                 return refreshed
             state = await self._read_state(prepared)
             known_state = state.status
@@ -291,6 +292,7 @@ class InvoiceService:
             stage = "refresh"
             basis = BillingBasis.model_validate(await asyncio.wait_for(
                 self.onec.resolve_basis(prepared.request), self.timeout))
+            basis = basis.model_copy(update={'operation_nonce': prepared.basis.operation_nonce})
             refreshed = PreparedInvoice(request=prepared.request, basis=basis, display_name=prepared.display_name)
             if refreshed.basis.key != prepared.basis.key:
                 raise ValueError("Provider changed billing identity during refresh")

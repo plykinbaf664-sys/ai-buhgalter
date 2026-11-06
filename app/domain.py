@@ -2,6 +2,7 @@ import hashlib
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated, Literal, Protocol
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, model_serializer
 
@@ -438,12 +439,14 @@ class ResolvedInvoiceCommand(StrictModel):
 
 
 class BillingBasis(StrictModel):
-    # Opaque, resolved by 1C: organisation, client, contract, service and period.
-    # The backend owns uniqueness and must revalidate the basis before writing.
+    # Business key identifies the resolved accounting context. A FirstBit write
+    # preview also receives a nonce: it identifies this attempt independently
+    # from other invoices for the same client/date and from its historical sample.
     key: str = Field(min_length=1, max_length=200)
     client_id: str = Field(min_length=1, max_length=200)
     revision: str = Field(min_length=1, max_length=200)
     preview: InvoicePreview | None = None
+    operation_nonce: UUID | None = None
 
 
 class PreparedInvoice(StrictModel):
@@ -483,7 +486,9 @@ class PreparedInvoice(StrictModel):
 
     @property
     def operation_id(self) -> str:
-        # Revision is intentionally excluded: changed data must not open a new operation.
+        if self.basis.operation_nonce is not None:
+            return hashlib.sha256(("invoice:v2:" + self.basis.operation_nonce.hex).encode()).hexdigest()
+        # Legacy frozen operations retain their original deterministic identity.
         return hashlib.sha256(("invoice:v1:" + self.basis.key).encode()).hexdigest()
 
 

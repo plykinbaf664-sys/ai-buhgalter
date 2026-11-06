@@ -7,6 +7,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import sqlite3
+from uuid import UUID
 
 import httpx
 import pytest
@@ -71,6 +72,18 @@ def test_multiple_unfinished_operations_are_restored_without_choosing_one(tmp_pa
         store.recoveries()
 
 
+def test_legacy_and_independent_operation_share_business_basis_without_journal_collision(tmp_path):
+    old = prepared()
+    new_basis = old.basis.model_copy(update={'operation_nonce': UUID(int=17)})
+    new = old.model_copy(update={'basis': new_basis})
+    store = journal(tmp_path / 'state' / 'operations.sqlite')
+    store.reserve(old, 123)
+    store.reserve(new, 123)
+    assert old.basis.key == new.basis.key and old.operation_id != new.operation_id
+    assert store.get(old.operation_id).prepared == old
+    assert journal(store.path).get(new.operation_id).prepared == new
+
+
 def test_distinct_invoice_can_be_confirmed_while_old_operation_waits(tmp_path):
     backend = FakeOneC()
     first = prepared_on(backend, date(2026, 9, 1), "ООО Двойник 1")
@@ -109,6 +122,12 @@ def test_distinct_invoice_can_be_confirmed_while_old_operation_waits(tmp_path):
         same = bot.show_preview(123, first, InvoiceCommand(client="ООО Двойник 1", invoice_date=date(2026, 9, 1)))
         assert not any(button.callback_data.startswith("invoice:confirm:")
                        for row in same.reply_markup.inline_keyboard for button in row)
+        independent = first.model_copy(update={'basis': first.basis.model_copy(
+            update={'operation_nonce': UUID(int=19)})})
+        fresh = bot.show_preview(123, independent,
+            InvoiceCommand(client="ООО Двойник 1", invoice_date=date(2026, 9, 1)))
+        assert any(button.callback_data.startswith("invoice:confirm:")
+                   for row in fresh.reply_markup.inline_keyboard for button in row)
     with TestClient(app()) as client:
         client.headers["X-Telegram-Bot-Api-Secret-Token"] = "s" * 32
         bot = client.app.state.bot

@@ -196,6 +196,37 @@ def test_marked_source_is_seen_by_get_and_never_recreated(tmp_path):
     asyncio.run(scenario())
 
 
+def test_same_business_basis_gets_independent_operations_and_old_deletion_is_local(tmp_path):
+    fixture = WriteFixture()
+    async def scenario():
+        backend = provider(fixture, tmp_path / 'state/operations.sqlite')
+        try:
+            service = InvoiceService(backend, journal=backend.journal, allow_real_writes=True)
+            first = await prepare(backend)
+            await service.execute(first, 'first-confirm', 123)
+            fixture.created[0]['DeletionMark'] = True
+            fixture.created[0]['Posted'] = False
+
+            second = await prepare(backend)
+            assert first.basis.key == second.basis.key
+            assert first.preview.historical_proposal.source_id == second.preview.historical_proposal.source_id
+            assert first.operation_id != second.operation_id
+            assert backend._marker(first.basis, first.operation_id) != backend._marker(second.basis, second.operation_id)
+            assert (await service.refresh(second, 'second-refresh', 123)).operation_id == second.operation_id
+            fixture.created_ref = ref(91)
+            result = await service.execute(second, 'second-confirm', 123)
+            assert result.invoice.document_id != fixture.created[0]['Ref_Key']
+            assert len(fixture.created) == 2
+            assert backend.journal.get(first.operation_id).invoice.document_id == fixture.created[0]['Ref_Key']
+            assert backend.journal.get(second.operation_id).invoice == result.invoice
+            with pytest.raises(SourceMarkedForDeletion):
+                await backend.read_operation(first.basis, first.operation_id)
+            assert (await backend.read_operation(second.basis, second.operation_id)).status == 'draft'
+        finally:
+            await backend.aclose()
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize('lost', ['before_commit', 'after_commit'])
 def test_lost_create_response_reconciles_and_never_blindly_replays(lost, tmp_path):
     fixture = WriteFixture()
@@ -339,7 +370,7 @@ def test_user_price_revision_is_rebound_to_a_new_accounting_review(tmp_path):
                 preview_overrides=(PreviewLineOverride(line_number=1, price=Decimal('1800'), description=literal),))
             edited = await service.prepare(command, 'edit', 123, existing=original, old_command=old)
             assert edited.preview.execution_review is not None
-            assert edited.operation_id == original.operation_id
+            assert edited.operation_id != original.operation_id
             assert edited.preview.execution_review.payload_sha256 != original.preview.execution_review.payload_sha256
             await service.execute(edited, 'confirm-edited', 123)
             assert fixture.created[0]['Inventory'][0]['Price'] == 1800

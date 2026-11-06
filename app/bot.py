@@ -276,9 +276,12 @@ class Bot:
 
     def show_preview(self, uid: int, prepared: PreparedInvoice, command: InvoiceCommand,
                      notice: str = "") -> ConfirmationPrompt:
-        existing = self._existing_operation_prompt(uid, prepared)
-        if existing is not None:
-            return existing
+        # Legacy/mock bases remain deterministic. A new FirstBit v2 preview
+        # has its own nonce, so same client/date/sample cannot hijack it.
+        if prepared.basis.operation_nonce is None:
+            existing = self._existing_operation_prompt(uid, prepared)
+            if existing is not None:
+                return existing
         previous_context = self.contexts.get(uid)
         selected_id = (previous_context.selected_client_id if previous_context is not None
                        and previous_context.draft.client == command.client else None)

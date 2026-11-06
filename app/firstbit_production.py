@@ -192,10 +192,11 @@ class FirstBitProduction(FirstBitWrite):
         return TaxInvoiceReference(document_id=invoice.document_id,source_document_id=source.document_id)
 
     async def get_tax_invoice_pdf(self,invoice):
-        # Same stable key-to-operation rule as PreparedInvoice.operation_id.
-        operation_id=hashlib.sha256(('invoice:v1:'+invoice.basis_key).encode()).hexdigest()
-        stored=self.journal.get(operation_id)
+        # A business basis can have several independent confirmed operations.
+        # The verified Tax Invoice reference uniquely identifies its operation.
+        stored=self.journal.get_by_tax_document(invoice.document_id)
         if stored is None or stored.tax is None or stored.tax.invoice!=invoice:raise InvoiceConflict()
+        operation_id=stored.prepared.operation_id
         basis=stored.prepared.basis
         source=await self._remote(basis,operation_id)
         if source is None or not source.posted or source.document_id!=invoice.source_document_id:raise InvoiceConflict()

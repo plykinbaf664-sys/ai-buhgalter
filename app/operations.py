@@ -90,6 +90,13 @@ class StoredOperation(StrictModel):
 
 
 class OperationJournal:
+    @staticmethod
+    def _reservation_key(prepared: PreparedInvoice) -> str:
+        # Keep the existing UNIQUE column without rewriting live journal rows.
+        # For v2 it identifies a confirmed attempt, not the shared business key.
+        nonce = prepared.basis.operation_nonce
+        return prepared.basis.key if nonce is None else prepared.basis.key + ':op:' + nonce.hex
+
     def __init__(self, path: Path, *, namespace: str, create: bool = False):
         if not namespace or len(namespace) > 200:
             raise ValueError("Invalid operation journal namespace")
@@ -187,7 +194,7 @@ class OperationJournal:
         if row is None:
             return None
         prepared = PreparedInvoice.model_validate_json(row["prepared"])
-        if (prepared.operation_id != operation_id or prepared.basis.key != row["basis_key"]
+        if (prepared.operation_id != operation_id or self._reservation_key(prepared) != row["basis_key"]
                 or prepared.preview.digest != row["digest"]):
             raise JournalUnavailable()
         tax_row = db.execute('SELECT * FROM tax_operations WHERE operation_id=?', (operation_id,)).fetchone()
@@ -215,6 +222,14 @@ class OperationJournal:
         with self._connection() as db:
             return self._load(db, operation_id)
 
+    def get_by_tax_document(self, document_id: str) -> StoredOperation | None:
+        """Resolve the operation by its unique verified Tax Invoice reference."""
+        with self._connection() as db:
+            self._check_namespace(db)
+            row = db.execute('SELECT operation_id FROM tax_operations WHERE tax_document_id=?',
+                             (document_id,)).fetchone()
+            return self._load(db, row['operation_id']) if row is not None else None
+
     def get_for_user(self, operation_id: str, user_id: int) -> tuple[StoredOperation, str] | None:
         """Return a confirmed operation only to the Telegram user who confirmed it."""
         if type(user_id) is not int or not 0 < user_id < 2**52:
@@ -241,7 +256,7 @@ class OperationJournal:
                 raise InvoiceConflict()
             if existing is None:
                 db.execute("INSERT INTO operations VALUES (?,?,?,?,?,NULL,NULL,NULL)",
-                    (prepared.operation_id, prepared.basis.key, prepared.preview.digest,
+                    (prepared.operation_id, self._reservation_key(prepared), prepared.preview.digest,
                      prepared.model_dump_json(), "reserved"))
             db.execute("INSERT OR IGNORE INTO deliveries VALUES (?,?,'ready')",
                        (prepared.operation_id, user_id))

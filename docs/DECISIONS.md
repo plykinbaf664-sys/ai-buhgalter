@@ -38,16 +38,16 @@ When a future provider/storage contract actually needs different public fields.
 
 ---
 
-## D3 — Keep operation identity independent of revision
+## D3 — Scope FirstBit operation identity to one confirmation
 
 ### Context
-Current code hashes `invoice:v1:` + basis key. Revision changes should trigger new confirmation, not a second business operation.
+The same client, contract and date can legitimately produce independent invoices. A basis-derived ID attached later requests to old confirmed operations, including documents subsequently marked for deletion.
 
 ### Decision
-Preserve this semantic.
+New FirstBit write previews receive independent nonces. Refresh preserves the nonce; an edit revokes the old confirmation. A new request receives a new nonce even with the same historical sample. Existing v1 operations retain their IDs and recover only their own documents. The exact journal and marker behavior is in [PRODUCTION_OPERATION](firstbit/PRODUCTION_OPERATION.md).
 
 ### Revisit when
-Only if business identity definition changes.
+Only if FirstBit provides a stronger provider-side operation identity.
 
 ---
 

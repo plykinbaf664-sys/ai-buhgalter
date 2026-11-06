@@ -10,7 +10,7 @@ from datetime import datetime, time, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 from urllib.parse import quote, urlencode
-from uuid import UUID
+from uuid import UUID, uuid4
 import xml.etree.ElementTree as ET
 
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -483,13 +483,18 @@ class FirstBitWrite(FirstBit):
         except ValueError:
             preview = InvoicePreview(**{**basis.preview.model_dump(), 'write_blocker': 'Учётные данные образца не прошли проверку для записи.'})
         return BillingBasis(**{**basis.model_dump(), 'preview': preview,
-            'revision': hashlib.sha256((basis.revision + preview.model_dump_json()).encode()).hexdigest()})
+            'revision': hashlib.sha256((basis.revision + preview.model_dump_json()).encode()).hexdigest(),
+            'operation_nonce': uuid4()})
 
     @staticmethod
     def _marker(basis, operation_id):
-        if operation_id != hashlib.sha256(('invoice:v1:' + basis.key).encode()).hexdigest():
+        nonce = basis.operation_nonce
+        expected = hashlib.sha256((('invoice:v2:' + nonce.hex) if nonce is not None
+                                   else ('invoice:v1:' + basis.key)).encode()).hexdigest()
+        if operation_id != expected:
             raise InvoiceConflict()
-        return 'ai-buhgalter:v1:' + operation_id + ':' + basis.preview.digest
+        version = 'v2' if nonce is not None else 'v1'
+        return 'ai-buhgalter:' + version + ':' + operation_id + ':' + basis.preview.digest
 
     def _frozen_payload(self, basis):
         review = basis.preview.execution_review
