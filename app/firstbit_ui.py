@@ -81,6 +81,7 @@ class FirstBitUI:
         self._generate_ack=None
         self._generate_dispatched=False
         self._generate_preflight_failed=False
+        self._generate_response_rejected=False
         self._generate_dispatch_error=None
         self._generate_event=asyncio.Event()
         self._login_rejected=asyncio.Event()
@@ -118,6 +119,8 @@ class FirstBitUI:
             method_name=native_method_name(response.request.post_data or '') if response.request.method=='POST' else None
             if method_name=='GenerateTaxInvoice' and self._capture_native_print:
                 self._generate_ack=response.status
+                if response.status >= 400 and native_session_rejected(await response.body()):
+                    self._generate_response_rejected=True
                 receipt=self.root/('native-generate-receipt-'+uuid.uuid4().hex+'.json')
                 receipt.write_text(__import__('json').dumps({'method':method_name,'http_status':response.status,'at':time.time()}))
                 receipt.chmod(0o600)
@@ -339,8 +342,8 @@ class FirstBitUI:
             finally:
                 await self.aclose()
 
-    async def generate_tax_invoice(self,reference,number,before_action,*,before_send):
-        if not callable(before_action) or not callable(before_send):
+    async def generate_tax_invoice(self,reference,number,before_action,*,before_send,on_rejected=None):
+        if not callable(before_action) or not callable(before_send) or (on_rejected is not None and not callable(on_rejected)):
             raise BackendFailure('firstbit_ui_missing_write_guard')
         async with self._lock:
             for attempt in range(2):
@@ -359,6 +362,7 @@ class FirstBitUI:
                     self._generate_ack=None
                     self._generate_dispatched=False
                     self._generate_preflight_failed=False
+                    self._generate_response_rejected=False
                     self._generate_dispatch_error=None
 
                     async def dispatch(route):
@@ -394,6 +398,12 @@ class FirstBitUI:
                     if self._generate_dispatch_error is not None:
                         raise self._generate_dispatch_error
                     if self._generate_preflight_failed and not self._generate_dispatched:
+                        if not attempt:
+                            continue
+                        raise BackendFailure('firstbit_ui_session_unavailable')
+                    if self._generate_response_rejected and self._generate_dispatched:
+                        if on_rejected is not None:
+                            await on_rejected()
                         if not attempt:
                             continue
                         raise BackendFailure('firstbit_ui_session_unavailable')
