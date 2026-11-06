@@ -40,10 +40,13 @@ class SyntheticNativeUI:
         document['Posted']=True
         document['DataVersion']='posted-v2'
         if self.fault==('tax_post_after_commit' if kind=='TaxInvoice' else 'post_after_commit'):raise TimeoutError('Synthetic native response lost')
-    async def generate_tax_invoice(self,reference,number,before_action,*,before_send):
+    async def generate_tax_invoice(self,reference,number,before_action,*,before_send,on_rejected=None):
         await before_action()
         if self.fault=='generate_preflight':raise BackendFailure('firstbit_ui_session_unavailable')
         await before_send();self.generates+=1
+        if self.fault=='generate_session_rejected':
+            if on_rejected is not None:await on_rejected()
+            raise BackendFailure('firstbit_ui_session_unavailable')
         if self.fault=='generate_before_commit':raise TimeoutError('Synthetic generation result unknown')
         record=tax_record(self.fixture,self.prepared);record['Posted']=self.auto_posted
         self.fixture.tax.append(record)
@@ -221,6 +224,27 @@ def test_new_schema_can_reconcile_legacy_posted_snapshot_but_never_write_it(tmp_
         with pytest.raises(WritesDisabled):await provider.ensure_draft(old.basis,old.operation_id)
         with pytest.raises(WritesDisabled):await provider.ensure_posted(old.basis,source,old.operation_id)
         await provider.aclose()
+    asyncio.run(scenario())
+
+
+def test_restart_after_confirmed_generation_session_rejection_can_retry_safely(tmp_path):
+    fixture=TaxFixture();ui=SyntheticNativeUI(fixture)
+    ui.fault='generate_session_rejected';path=tmp_path/'private/operations.sqlite'
+    async def scenario():
+        provider=backend(fixture,path,ui);prepared=await prepare(provider);ui.prepared=prepared
+        try:
+            with pytest.raises(WorkflowFailure):
+                await InvoiceService(provider,journal=provider.journal,allow_real_writes=True).execute(prepared,'confirm',123)
+            assert provider.journal.tax_generation_unsubmitted(prepared.operation_id)
+            assert fixture.tax==[]
+        finally:await provider.aclose()
+        ui.fault=None
+        provider=backend(fixture,path,ui);ui.prepared=prepared
+        try:
+            result=await InvoiceService(provider,journal=provider.journal,allow_real_writes=True).execute(prepared,'retry',123)
+            assert result.tax_invoice.posted and result.pdf.content.startswith(b'%PDF-')
+            assert fixture.posts==1 and ui.generates==2
+        finally:await provider.aclose()
     asyncio.run(scenario())
 
 
