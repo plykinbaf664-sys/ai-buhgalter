@@ -133,15 +133,13 @@ def test_unsent_native_post_survives_restart_and_completes_same_documents(tmp_pa
     asyncio.run(scenario())
 
 
-def test_ui_readonly_warmup_failure_does_not_consume_create_or_send_claim(tmp_path):
+def test_historical_sample_ui_warmup_is_not_required_for_new_operation(tmp_path):
     fixture=TaxFixture();ui=SyntheticNativeUI(fixture);path=tmp_path/'private/operations.sqlite'
     async def scenario():
         provider=backend(fixture,path,ui);prepared=await prepare(provider);ui.prepared=prepared;ui.fault='warm'
         service=InvoiceService(provider,journal=provider.journal,allow_real_writes=True)
-        with pytest.raises(WorkflowFailure):await service.execute(prepared,'before-create',123)
-        assert fixture.posts==0 and provider.journal.get(prepared.operation_id).phase=='reserved'
-        result=await service.execute(prepared,'safe-retry-before-any-write',123)
-        assert result.tax_invoice.posted and fixture.posts==1
+        result=await service.execute(prepared,'fresh-operation',123)
+        assert result.tax_invoice.posted and fixture.posts==1 and ui.warms==[]
         await provider.aclose()
     asyncio.run(scenario())
 

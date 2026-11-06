@@ -85,13 +85,10 @@ class FirstBitProduction(FirstBitWrite):
 
     async def read_operation(self,basis,operation_id):
         await self._schema()
-        state=await super().read_operation(basis,operation_id)
-        # Browser preparation is read-only and precedes durable financial intent.
-        # A login/navigation failure must not consume an Invoice create/post claim.
-        if state.status=='not_started':
-            history=basis.preview.historical_proposal
-            await self.ui.warm_document('InventoryExpense',UUID(history.source_id),history.source_number)
-        return state
+        # Reconciliation concerns this operation's marker and document only.
+        # Opening the historical sample in a browser can fail independently
+        # and must never block a fresh, not-yet-created Invoice.
+        return await super().read_operation(basis,operation_id)
 
     async def ensure_posted(self,basis,invoice,operation_id):
         self._require_current_review(basis)

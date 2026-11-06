@@ -10,6 +10,7 @@ The current operation ID is derived from a FirstBit billing key scoped to issuer
 - Give each new FirstBit preview an independent operation nonce. Preserve it through preview refresh; use its ID only after confirmation. Keep legacy confirmed snapshots readable and recoverable.
 - Allow multiple reservations for one business key while retaining unique operation/source/tax references. Keep `/retry` scoped to the chosen frozen operation; new requests do not inherit its outcome.
 - Do not change historical source selection, accounting review, preview editing or financial write guards.
+- Remove historical-sample browser warmup from `read_operation(not_started)`: reconciliation must inspect only the candidate operation's own marker; UI availability is checked at the actual posting/generation stage.
 
 ## Verification
 
