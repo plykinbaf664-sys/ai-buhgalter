@@ -342,6 +342,24 @@ class OperationJournal:
             db.execute('INSERT OR IGNORE INTO provider_requests VALUES (?,?)',
                        (operation_id, stage + '_session_rejected'))
 
+    def reject_tax_generation_before_application(self, operation_id: str) -> None:
+        """Release only a GenerateTaxInvoice request explicitly rejected by 1C before application."""
+        with self._connection() as db:
+            stored = self._load(db, operation_id)
+            valid = (stored is not None and stored.invoice is not None and stored.invoice.posted
+                     and stored.tax is not None and stored.tax.phase == 'generation_started'
+                     and stored.tax.invoice is None and stored.tax.returned_reference is None
+                     and stored.pdf is None)
+            if not valid:
+                raise MutationUncertain()
+            deleted = db.execute(
+                "DELETE FROM provider_requests WHERE operation_id=? AND stage='generate_tax'",
+                (operation_id,))
+            if deleted.rowcount != 1:
+                raise MutationUncertain()
+            db.execute("INSERT OR IGNORE INTO provider_requests VALUES (?,?)",
+                       (operation_id, 'generate_tax_session_rejected'))
+
     @staticmethod
     def _tax_generation_unsubmitted(db, stored) -> bool:
         return bool(stored is not None and stored.invoice is not None and stored.invoice.posted
