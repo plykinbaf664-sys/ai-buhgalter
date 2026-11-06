@@ -124,6 +124,9 @@ def failure_text(exc: WorkflowFailure) -> str:
         return ("Этот ранее созданный Invoice помечен на удаление в 1С, поэтому его Tax Invoice завершить нельзя. "
                 "Для нового счёта отправьте обычный запрос и подтвердите новый preview. "
                 "Если восстановите прежний Invoice в 1С, его можно продолжить через /retry.")
+    if exc.stage == 'tax_pdf':
+        return ("Invoice и Tax Invoice уже проведены в 1С. Штатный PDF пока не получен. "
+                "Отправьте /retry для повторной печати этого же Tax Invoice; новые документы не создаются.")
     if exc.stage.startswith('tax_'):
         return ('Invoice уже создан в 1С. Результат Tax Invoice пока не подтверждён. '
                 '/retry проверит этот же счёт; повторно создавать документ вслепую бот не будет.')
@@ -145,9 +148,12 @@ def failure_text(exc: WorkflowFailure) -> str:
 
 class Bot:
     def __init__(self, service: InvoiceService, telegram: Telegram, interpreter: CommandInterpreter,
-                 speech: SpeechToText | None = None):
+                 speech: SpeechToText | None = None, *, defer_financial: bool = False):
         self.service, self.telegram, self.interpreter = service, telegram, interpreter
         self.speech = speech
+        self.defer_financial = defer_financial
+        self._completion_tasks: dict[str, asyncio.Task] = {}
+        self._completion_retry_delay = 30
         # Unconfirmed conversations remain process-local. An optional private
         # journal restores only already-confirmed operations and PDF delivery.
         self.pending: dict[int, Pending] = {}
@@ -164,6 +170,98 @@ class Bot:
         self.delivered: dict[DeliveredInvoice, PreparedInvoice] = {}
         self.delivery_attempted: set[DeliveredInvoice] = set()
         self.confirmed_tokens: dict[str, tuple[int, PreparedInvoice]] = {}
+
+    def _queue_completion(self, uid: int, prepared: PreparedInvoice) -> bool:
+        operation_id = prepared.operation_id
+        if operation_id in self._completion_tasks:
+            return False
+        task = asyncio.create_task(self._run_completion(uid, prepared))
+        self._completion_tasks[operation_id] = task
+        return True
+
+    async def _run_completion(self, uid: int, prepared: PreparedInvoice) -> None:
+        operation_id = prepared.operation_id
+        actor = Message.model_validate({"message_id": 1, "from": {"id": uid, "is_bot": False},
+                                        "chat": {"id": uid, "type": "private"}, "text": "/retry"})
+        updates = asyncio.create_task(self._completion_updates(uid, operation_id))
+        try:
+            for attempt in range(2):
+                receipt = Receipt(fingerprint="0" * 64, prepared=prepared, progress_sent=True)
+                try:
+                    await self.handle(actor, receipt, f"completion-{operation_id[:16]}-{attempt}",
+                                      background_attempt=attempt)
+                except Exception as exc:
+                    event(request_id='completion', user_id=uid, stage='background', status='error',
+                          operation_id=operation_id, error=safe_backend_error(exc))
+                    try:
+                        if self.service.journal.delivery_status(operation_id, uid) == 'ready':
+                            await self.telegram.send_text(uid,
+                                'Не удалось завершить обработку счёта. Состояние документов сохранено; '
+                                'проверю эту же операцию после перезапуска или по команде /retry.')
+                    except Exception:
+                        pass
+                status = self.service.journal.delivery_status(operation_id, uid)
+                if status != 'ready':
+                    return  # delivered, finalized, or uncertain Telegram delivery
+                stored = self.service.journal.get(operation_id)
+                if (stored is None or stored.invoice is None or not stored.invoice.posted
+                        or stored.tax is None or stored.tax.invoice is None
+                        or not stored.tax.invoice.posted or stored.pdf is not None):
+                    return  # no automatic replay of an uncertain financial mutation
+                if attempt == 0:
+                    await asyncio.sleep(self._completion_retry_delay)
+        finally:
+            updates.cancel()
+            try:
+                await updates
+            except asyncio.CancelledError:
+                pass
+            self._completion_tasks.pop(operation_id, None)
+
+    async def _completion_updates(self, uid: int, operation_id: str) -> None:
+        previous = 0
+        for elapsed in range(45, 646, 60):
+            await asyncio.sleep(elapsed - previous)
+            previous = elapsed
+            try:
+                stored = self.service.journal.get(operation_id)
+                if stored is None or stored.pdf is not None:
+                    return
+                if stored.tax is not None and stored.tax.invoice is not None and stored.tax.invoice.posted:
+                    message = "Invoice и Tax Invoice проведены. Ожидаю штатный PDF из 1С; пришлю его сюда."
+                elif stored.invoice is not None and stored.invoice.posted:
+                    message = "Invoice проведён. Проверяю связанный Tax Invoice в 1С."
+                else:
+                    message = "Сверяю подтверждённый счёт с 1С. Результат пришлю сюда."
+                await self.telegram.send_text(uid, message)
+            except DeliveryFailure:
+                pass  # Status delivery does not affect the accounting operation.
+            except Exception as exc:
+                event(request_id='completion', user_id=uid, stage='progress', status='error',
+                      operation_id=operation_id, error=safe_backend_error(exc))
+                return
+
+    async def resume_pending(self) -> None:
+        """After restart, resume only confirmed operations whose live state is readable."""
+        if not self.defer_financial or self.service.journal is None:
+            return
+        for uid, items in tuple(self.recoveries.items()):
+            for prepared in tuple(items.values()):
+                if self.service.journal.delivery_status(prepared.operation_id, uid) != 'ready':
+                    continue
+                try:
+                    state = await self.service._read_state(prepared)
+                except Exception:
+                    continue  # deleted/uncertain source: no autonomous mutation
+                if state.status != 'unknown':
+                    self._queue_completion(uid, prepared)
+
+    async def stop_completions(self) -> None:
+        tasks = tuple(self._completion_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def _remember_recovery(self, uid: int, prepared: PreparedInvoice) -> None:
         self.recoveries.setdefault(uid, {})[prepared.operation_id] = prepared
@@ -976,7 +1074,8 @@ class Bot:
         event(request_id=request_id, user_id=uid, stage="interpret", status="success")
         return self.show_preview(uid, prepared, command)
 
-    async def handle(self, message: Message | CallbackQuery, receipt: Receipt, request_id: str) -> None:
+    async def handle(self, message: Message | CallbackQuery, receipt: Receipt, request_id: str,
+                     *, background_attempt: int = -1) -> None:
         uid = message.sender.id
         stage = "interpret"
         try:
@@ -997,6 +1096,28 @@ class Bot:
                                                 operation_id=receipt.prepared.operation_id)
                     journal = self.service.journal
                     durable_status = journal.delivery_status(delivery.operation_id, uid) if journal is not None else None
+                    if (self.defer_financial and background_attempt < 0
+                            and durable_status not in ('delivered', 'sending')
+                            and delivery.operation_id in self._completion_tasks):
+                        receipt.prepared = None
+                        receipt.response_text = "Этот счёт уже обрабатывается. Результат и PDF пришлю сюда автоматически."
+                        await self.telegram.send_text(uid, receipt.response_text)
+                        receipt.response_sent = 1
+                        return
+                    if (self.defer_financial and background_attempt < 0
+                            and durable_status not in ('delivered', 'sending') and journal is not None):
+                        frozen = receipt.prepared
+                        journal.reserve(frozen, uid)
+                        self._queue_completion(uid, frozen)
+                        receipt.prepared = None
+                        receipt.response_text = ("Подтверждение принято. Проверяю Invoice и Tax Invoice в 1С; "
+                                                 "готовый PDF пришлю сюда автоматически.")
+                        try:
+                            await self.telegram.send_text(uid, receipt.response_text)
+                        except DeliveryFailure:
+                            pass  # The durable completion is already queued.
+                        receipt.response_sent = 1
+                        return
                     if delivery in self.delivered or durable_status == "delivered":
                         event(request_id=request_id, user_id=uid, stage="delivery", status="duplicate",
                               operation_id=delivery.operation_id)
@@ -1030,7 +1151,8 @@ class Bot:
                         except WorkflowFailure as first:
                             if (getattr(self.service.onec, 'requires_tax_invoice', False) is not True
                                     or first.state not in ('draft', 'posted')
-                                    or first.stage in ('source_deleted', 'stale', 'write_disabled')):
+                                    or first.stage in ('source_deleted', 'stale', 'write_disabled')
+                                    or background_attempt >= 0 and first.stage == 'tax_pdf'):
                                 raise
                             # One bounded GET-first continuation of the same frozen
                             # operation. Journal claims still prohibit blind writes.
@@ -1094,7 +1216,15 @@ class Bot:
             else:
                 if receipt.prepared is not None:
                     self._remember_recovery(uid, receipt.prepared)
-                receipt.response_text = failure_text(exc)
+                if exc.stage == 'tax_pdf' and background_attempt >= 0:
+                    receipt.response_text = (
+                        "Invoice и Tax Invoice уже проведены в 1С. Штатная PDF-печать временно не ответила; "
+                        "повторю её автоматически без создания новых документов."
+                        if background_attempt == 0 else
+                        "Invoice и Tax Invoice проведены в 1С, но 1С не выдала PDF после повторной попытки. "
+                        "Документы сохранены; нужна проверка доступа к печати FirstBit.")
+                else:
+                    receipt.response_text = failure_text(exc)
         except DeliveryFailure:
             if receipt.prepared is not None:
                 self._remember_recovery(uid, receipt.prepared)

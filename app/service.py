@@ -44,6 +44,11 @@ def safe_backend_error(exc: Exception) -> str:
         code = exc.args[0]
         if re.fullmatch(r"firstbit_(?:schema_mismatch|write_schema_mismatch|create_uncertain|create_readback_mismatch|get_failed(?:_(?:timeout|http_error|http_[1-5][0-9]{2}|response_too_large|invalid_response))?)", code):
             return code
+        if code in {'firstbit_ui_session_unavailable', 'firstbit_ui_login_rejected',
+                    'firstbit_ui_login_timeout', 'firstbit_ui_command_not_ready',
+                    'firstbit_ui_print_schema', 'firstbit_native_pdf_size',
+                    'firstbit_native_pdf_signature', 'firstbit_native_pdf_provenance_mismatch'}:
+            return code
     return type(exc).__name__
 
 

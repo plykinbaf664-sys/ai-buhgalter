@@ -115,7 +115,10 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                     ai_client, settings.openai_api_key, settings.stt_model, sdk_client=openai_client,
                     model_selector=model_selector if settings.stt_model == "auto" else None,
                 ) if settings.ai_mode == "openai" else None)
-                app.state.bot = Bot(service, telegram, interpreter, speech)
+                app.state.bot = Bot(service, telegram, interpreter, speech,
+                                    defer_financial=settings.mode == 'firstbit_write' and owned_backend is not None)
+                recovery_task = (asyncio.create_task(app.state.bot.resume_pending())
+                                 if app.state.bot.defer_financial else None)
                 schema_task = None
                 if settings.firstbit_native_ui_enabled and owned_backend is not None:
                     from app.schema_monitor import monitor_schema
@@ -128,6 +131,13 @@ def create_app(settings: Settings | None = None, *, backend: OneC | None = None,
                 try:
                     yield
                 finally:
+                    if recovery_task is not None:
+                        recovery_task.cancel()
+                        try:
+                            await recovery_task
+                        except asyncio.CancelledError:
+                            pass
+                    await app.state.bot.stop_completions()
                     if schema_task is not None:
                         schema_task.cancel()
                         try:

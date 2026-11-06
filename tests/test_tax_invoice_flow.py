@@ -4,6 +4,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 import sqlite3
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import httpx
@@ -110,7 +111,7 @@ class SyntheticTaxProvider(FakeOneC):
     async def get_tax_invoice_pdf(self, invoice):
         self.prints += 1
         self.trace.append('tax_pdf')
-        if self.tax_fault == 'pdf_timeout':
+        if self.tax_fault == 'pdf_timeout' or self.tax_fault == 'pdf_once' and self.prints == 1:
             raise TimeoutError('Synthetic native PDF timeout')
         provenance = TaxPdfProvenance(document_id='synthetic-wrong-tax' if self.bad_pdf else invoice.document_id,
             source_document_id=invoice.source_document_id, document_revision=invoice.revision,
@@ -412,6 +413,78 @@ def test_telegram_tax_pdf_restart_redelivery_and_unknown_delivery(tmp_path, lose
     assert backend.creates == backend.generates == backend.prints == sent.count('sendDocument') == 1
     operation_id = asyncio.run(prepare(backend)).operation_id
     assert backend.journal.delivery_status(operation_id, 123) == ('sending' if lose_acknowledgement else 'delivered')
+
+
+def test_deferred_confirmation_recovers_pdf_without_recreating_documents(tmp_path):
+    path = tmp_path / 'private/operations.sqlite'
+    backend = SyntheticTaxProvider(store(path))
+    backend.tax_fault = 'pdf_once'
+    settings = Settings(token='123:' + 'x' * 32, webhook_secret='s' * 32,
+        allowed_users=frozenset({123}), mode='firstbit_write', onec_write_enabled=True,
+        operation_db=path, firstbit_write_schema_sha256='a' * 64)
+    sent = []
+
+    def respond(request):
+        sent.append(request.url.path.rsplit('/', 1)[-1])
+        return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}})
+
+    def update(number, text):
+        return {'update_id': number, 'message': {'message_id': number,
+            'from': {'id': 123, 'is_bot': False}, 'chat': {'id': 123, 'type': 'private'}, 'text': text}}
+
+    with TestClient(create_app(settings, backend=backend, telegram_transport=httpx.MockTransport(respond))) as client:
+        client.headers['X-Telegram-Bot-Api-Secret-Token'] = 's' * 32
+        bot = client.app.state.bot
+        bot.defer_financial = True
+        bot._completion_retry_delay = 0
+        assert client.post('/telegram/webhook', json=update(1, TEXT)).status_code == 200
+        token = bot.pending[123].token
+        confirm = update(2, '/confirm ' + token)
+        assert client.post('/telegram/webhook', json=confirm).status_code == 200
+        operation_id = next(iter(bot._completion_tasks))
+        for _ in range(200):
+            if backend.journal.delivery_status(operation_id, 123) == 'delivered':
+                break
+            time.sleep(.02)
+        assert backend.journal.delivery_status(operation_id, 123) == 'delivered'
+        assert client.post('/telegram/webhook', json=confirm).status_code == 200
+        assert client.post('/telegram/webhook', json=update(3, '/retry')).status_code == 200
+    assert backend.creates == backend.generates == 1
+    assert backend.prints == 2
+    assert sent.count('sendDocument') == 1
+
+
+def test_restart_resumes_confirmed_pdf_without_repeat_create_or_generate(tmp_path):
+    path = tmp_path / 'private/operations.sqlite'
+    backend = SyntheticTaxProvider(store(path))
+    backend.tax_fault = 'pdf_timeout'
+    prepared = asyncio.run(prepare(backend))
+    with pytest.raises(WorkflowFailure) as failure:
+        asyncio.run(service(backend).execute(prepared, 'before-restart', 123))
+    assert failure.value.stage == 'tax_pdf'
+    assert backend.creates == backend.generates == backend.prints == 1
+    backend.tax_fault = None
+    backend.journal = store(path, create=False)
+    settings = Settings(token='123:' + 'x' * 32, webhook_secret='s' * 32,
+        allowed_users=frozenset({123}), mode='firstbit_write', onec_write_enabled=True,
+        operation_db=path, firstbit_write_schema_sha256='a' * 64)
+    sent = []
+
+    def respond(request):
+        sent.append(request.url.path.rsplit('/', 1)[-1])
+        return httpx.Response(200, json={'ok': True, 'result': {'message_id': 1, 'chat': {'id': 123}}})
+
+    with TestClient(create_app(settings, backend=backend, telegram_transport=httpx.MockTransport(respond))) as client:
+        bot = client.app.state.bot
+        bot.defer_financial = True
+        client.portal.call(bot.resume_pending)
+        for _ in range(200):
+            if backend.journal.delivery_status(prepared.operation_id, 123) == 'delivered':
+                break
+            time.sleep(.02)
+        assert backend.journal.delivery_status(prepared.operation_id, 123) == 'delivered'
+    assert backend.creates == backend.generates == 1
+    assert backend.prints == 2 and sent.count('sendDocument') == 1
 
 
 def test_bot_finishes_known_posted_operation_after_lost_generation_response(tmp_path):
